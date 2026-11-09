@@ -34,16 +34,11 @@ try:
 except ImportError:
     HAS_ALBUMENTATIONS = False
 
-from sota_models.transunet import TransUNet, PretrainedTransUNet
-from sota_models.vmunet import VMUNet, PretrainedVMUNet
-from sota_models.swin_unetr import SwinUNETR2D, SwinUNet2D, PretrainedSwinUNet
-from models.ResUnet import ResUnet
-from models.unet_model_updated import UNet_updated
-from models.Attention_UNet_updated_version_1 import Attention_UNet_updated_version_1
-from models.SegNet import SegNet
-from models.unet_plus_plus_naveen import NestedUNet
-from models.basnet_model.BASNet import BASNet
-from models.u2_net_model.u2net import U2NET, U2NETP
+# Add local directory to python path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from models import get_sota_model
+from datasets import GoldenUltrasoundDataset
 
 # Calibration constant for Depth 3.0cm
 CALIB_CSA_MM2 = 0.004328254
@@ -161,201 +156,16 @@ class LovaszLoss(nn.Module):
 # 3. Model Factory
 # ==============================================================================
 def get_model(model_name):
-    m = model_name.lower().strip()
-    if m == "swin-unet":
-        return PretrainedSwinUNet(in_channels=3, out_channels=1, pretrained=True)
-    elif m == "swin-unetr":
-        return SwinUNETR2D(in_channels=3, out_channels=1)
-    elif m == "transunet":
-        return PretrainedTransUNet(in_channels=3, out_channels=1, pretrained=True)
-    elif m == "vmunet":
-        return PretrainedVMUNet(in_channels=3, out_channels=1, pretrained=True)
-    elif m == "unetr":
-        from pretrained_unetr import get_pretrained_unetr_2d
-        class UNETR2D(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.net = get_pretrained_unetr_2d()
-            def forward(self, x):
-                logits = self.net(x)
-                return logits, torch.sigmoid(logits)
-        return UNETR2D()
-    elif m == "resunet":
-        import torchvision.models as models
-        class PretrainedResUNet(nn.Module):
-            def __init__(self, in_channels=3, out_channels=1, pretrained=True):
-                super().__init__()
-                weights = models.ResNet34_Weights.DEFAULT if pretrained else None
-                res = models.resnet34(weights=weights)
-                self.conv1 = res.conv1
-                self.bn1 = res.bn1
-                self.relu = res.relu
-                self.maxpool = res.maxpool
-                self.layer1 = res.layer1 # 64
-                self.layer2 = res.layer2 # 128
-                self.layer3 = res.layer3 # 256
-                self.layer4 = res.layer4 # 512
-
-                self.up4 = nn.ConvTranspose2d(512, 256, 2, stride=2)
-                self.dec4 = nn.Sequential(nn.Conv2d(512, 256, 3, padding=1), nn.BatchNorm2d(256), nn.ReLU(inplace=True))
-
-                self.up3 = nn.ConvTranspose2d(256, 128, 2, stride=2)
-                self.dec3 = nn.Sequential(nn.Conv2d(256, 128, 3, padding=1), nn.BatchNorm2d(128), nn.ReLU(inplace=True))
-
-                self.up2 = nn.ConvTranspose2d(128, 64, 2, stride=2)
-                self.dec2 = nn.Sequential(nn.Conv2d(128, 64, 3, padding=1), nn.BatchNorm2d(64), nn.ReLU(inplace=True))
-
-                self.up1 = nn.ConvTranspose2d(64, 64, 2, stride=2)
-                self.dec1 = nn.Sequential(nn.Conv2d(128, 64, 3, padding=1), nn.BatchNorm2d(64), nn.ReLU(inplace=True))
-
-                self.up0 = nn.ConvTranspose2d(64, 32, 2, stride=2)
-                self.dec0 = nn.Sequential(nn.Conv2d(32, 32, 3, padding=1), nn.BatchNorm2d(32), nn.ReLU(inplace=True))
-
-                self.head = nn.Conv2d(32, out_channels, 1)
-
-            def forward(self, x):
-                x0 = self.relu(self.bn1(self.conv1(x)))
-                e1 = self.layer1(self.maxpool(x0))
-                e2 = self.layer2(e1)
-                e3 = self.layer3(e2)
-                e4 = self.layer4(e3)
-
-                d4 = self.dec4(torch.cat([self.up4(e4), e3], dim=1))
-                d3 = self.dec3(torch.cat([self.up3(d4), e2], dim=1))
-                d2 = self.dec2(torch.cat([self.up2(d3), e1], dim=1))
-                d1 = self.dec1(torch.cat([self.up1(d2), x0], dim=1))
-                d0 = self.dec0(self.up0(d1))
-                logits = self.head(d0)
-                return logits, torch.sigmoid(logits)
-        return PretrainedResUNet(in_channels=3, out_channels=1, pretrained=True)
-    elif m == "attention-unet":
-        class AttnUnetWrapper(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.net = Attention_UNet_updated_version_1(3, 1)
-            def forward(self, x):
-                logits = self.net(x)
-                return logits, torch.sigmoid(logits)
-        return AttnUnetWrapper()
-    elif m == "unet":
-        class UNetWrapper(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.net = UNet_updated(3, 1)
-            def forward(self, x):
-                logits = self.net(x)
-                return logits, torch.sigmoid(logits)
-        return UNetWrapper()
-    elif m == "nestedunet":
-        class NestedUNetWrapper(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.net = NestedUNet(3, 1)
-            def forward(self, x):
-                logits = self.net(x)
-                return logits, torch.sigmoid(logits)
-        return NestedUNetWrapper()
-    elif m == "segnet":
-        import torchvision.models as models
-        class PretrainedSegNet(nn.Module):
-            def __init__(self, in_channels=3, out_channels=1, pretrained=True):
-                super().__init__()
-                weights = models.VGG16_BN_Weights.DEFAULT if pretrained else None
-                vgg = models.vgg16_bn(weights=weights)
-                feats = vgg.features
-
-                self.stage1 = feats[0:6]
-                self.pool1 = nn.MaxPool2d(2, 2, return_indices=True)
-
-                self.stage2 = feats[7:13]
-                self.pool2 = nn.MaxPool2d(2, 2, return_indices=True)
-
-                self.stage3 = feats[14:23]
-                self.pool3 = nn.MaxPool2d(2, 2, return_indices=True)
-
-                self.stage4 = feats[24:33]
-                self.pool4 = nn.MaxPool2d(2, 2, return_indices=True)
-
-                self.unpool4 = nn.MaxUnpool2d(2, 2)
-                self.dec4 = nn.Sequential(nn.Conv2d(512, 256, 3, padding=1), nn.BatchNorm2d(256), nn.ReLU(inplace=True))
-
-                self.unpool3 = nn.MaxUnpool2d(2, 2)
-                self.dec3 = nn.Sequential(nn.Conv2d(256, 128, 3, padding=1), nn.BatchNorm2d(128), nn.ReLU(inplace=True))
-
-                self.unpool2 = nn.MaxUnpool2d(2, 2)
-                self.dec2 = nn.Sequential(nn.Conv2d(128, 64, 3, padding=1), nn.BatchNorm2d(64), nn.ReLU(inplace=True))
-
-                self.unpool1 = nn.MaxUnpool2d(2, 2)
-                self.dec1 = nn.Sequential(nn.Conv2d(64, 32, 3, padding=1), nn.BatchNorm2d(32), nn.ReLU(inplace=True))
-                self.head = nn.Conv2d(32, out_channels, 1)
-
-            def forward(self, x):
-                e1 = self.stage1(x)
-                p1, idx1 = self.pool1(e1)
-
-                e2 = self.stage2(p1)
-                p2, idx2 = self.pool2(e2)
-
-                e3 = self.stage3(p2)
-                p3, idx3 = self.pool3(e3)
-
-                e4 = self.stage4(p3)
-                p4, idx4 = self.pool4(e4)
-
-                d4 = self.dec4(self.unpool4(p4, idx4, output_size=e4.size()))
-                d3 = self.dec3(self.unpool3(d4, idx3, output_size=e3.size()))
-                d2 = self.dec2(self.unpool2(d3, idx2, output_size=e2.size()))
-                d1 = self.dec1(self.unpool1(d2, idx1, output_size=e1.size()))
-                logits = self.head(d1)
-                return logits, torch.sigmoid(logits)
-        return PretrainedSegNet(in_channels=3, out_channels=1, pretrained=True)
-    elif m == "basnet":
-        class BASNetWrapper(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.net = BASNet(3, 1)
-            def forward(self, x):
-                out = self.net(x)
-                logits = out[0] if isinstance(out, (list, tuple)) else out
-                return logits, torch.sigmoid(logits)
-        return BASNetWrapper()
-    elif m == "u2net":
-        class U2NetWrapper(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.net = U2NET(3, 1)
-            def forward(self, x):
-                out = self.net(x)
-                logits = out[0] if isinstance(out, (list, tuple)) else out
-                return logits, torch.sigmoid(logits)
-        return U2NetWrapper()
-    elif m in ["mnseg-net", "mnsegnet"]:
-        from models.u2_net_model.U2Net_along_with_Half_UNet import U2NETP_along_with_Half_UNet_style_Decoder_with_custom_channels
-        class MNSegNetWrapper(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.net = U2NETP_along_with_Half_UNet_style_Decoder_with_custom_channels(3, 1, 128, 16)
-            def forward(self, x):
-                outputs = self.net(x)
-                probs = outputs[0]
-                logits = torch.logit(probs.clamp(1e-6, 1.0 - 1e-6))
-                return logits, probs
-        return MNSegNetWrapper()
-    else:
-        try:
-            from sota_models.modern_sota_models import get_modern_model
-            modern_net = get_modern_model(m, in_channels=3, num_classes=1, img_size=(448, 320))
-            class ModernWrapper(nn.Module):
-                def __init__(self, net):
-                    super().__init__()
-                    self.net = net
-                def forward(self, x):
-                    out = self.net(x)
-                    logits = out[0] if isinstance(out, (list, tuple)) else out
-                    return logits, torch.sigmoid(logits)
-            return ModernWrapper(modern_net)
-        except Exception as e:
-            raise ValueError(f"Model {model_name} not recognized: {e}")
+    net = get_sota_model(model_name, in_channels=3, out_channels=1, pretrained=True)
+    class SOTAWrapper(nn.Module):
+        def __init__(self, net):
+            super().__init__()
+            self.net = net
+        def forward(self, x):
+            out = self.net(x)
+            logits = out[0] if isinstance(out, (list, tuple)) else out
+            return logits, torch.sigmoid(logits)
+    return SOTAWrapper(net)
 
 # ==============================================================================
 # 4. ModelEMA (Exponential Moving Average)

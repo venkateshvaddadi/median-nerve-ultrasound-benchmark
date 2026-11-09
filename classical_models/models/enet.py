@@ -9,10 +9,7 @@ Taken from : https://github.com/davidtvs/PyTorch-ENet/tree/master/models
 
 import torch.nn as nn
 import torch
-from config import Config
-import numpy as np
-
-config = Config()
+# Removed external config dependency
 
 
 class InitialBlock(nn.Module):
@@ -334,12 +331,7 @@ class DownsamplingBottleneck(nn.Module):
         # Main branch channel padding
         n, ch_ext, h, w = ext.size()
         ch_main = main.size()[1]
-        padding = torch.zeros(n, ch_ext - ch_main, h, w)
-
-        # Before concatenating, check if main is on the CPU or GPU and
-        # convert padding accordingly
-        if main.is_cuda:
-            padding = padding.cuda(config.gpuid)
+        padding = torch.zeros(n, ch_ext - ch_main, h, w, device=main.device, dtype=main.dtype)
 
         # Concatenate
         main = torch.cat((main, padding), 1)
