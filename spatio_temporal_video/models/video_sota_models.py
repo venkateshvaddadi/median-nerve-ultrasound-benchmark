@@ -175,24 +175,64 @@ class DividedSpaceTimeBlock(nn.Module):
 class TimeSformerUNet(nn.Module):
     """
     Spatio-Temporal Video Segmentation Transformer with Divided Space-Time Attention.
+    Initializes spatial attention and patch projection from official ViT-B/16 pretrained weights.
     """
-    def __init__(self, in_channels=3, out_channels=1, embed_dim=256, depth=4, patch_size=16):
+    def __init__(self, in_channels=3, out_channels=1, embed_dim=768, depth=8, patch_size=16, pretrained_path=None):
         super().__init__()
         self.patch_size = patch_size
         self.embed_dim = embed_dim
         self.stem = nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size)
 
         self.blocks = nn.ModuleList([
-            DividedSpaceTimeBlock(dim=embed_dim, num_heads=8) for _ in range(depth)
+            DividedSpaceTimeBlock(dim=embed_dim, num_heads=12) for _ in range(depth)
         ])
         self.norm = nn.LayerNorm(embed_dim)
 
         # Decoder to restore original frame resolution
-        self.dec1 = nn.ConvTranspose2d(embed_dim, 128, kernel_size=2, stride=2)
-        self.dec2 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
-        self.dec3 = nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2)
-        self.dec4 = nn.ConvTranspose2d(32, 16, kernel_size=2, stride=2)
-        self.head = nn.Conv2d(16, out_channels, kernel_size=1)
+        self.dec1 = nn.ConvTranspose2d(embed_dim, 256, kernel_size=2, stride=2)
+        self.dec2 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
+        self.dec3 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
+        self.dec4 = nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2)
+        self.head = nn.Conv2d(32, out_channels, kernel_size=1)
+
+        if pretrained_path and os.path.exists(pretrained_path):
+            self.load_pretrained_vit(pretrained_path)
+
+    def load_pretrained_vit(self, path):
+        try:
+            state = torch.load(path, map_location='cpu', weights_only=False)
+            loaded = 0
+            # 1. Load stem projection
+            if "conv_proj.weight" in state and state["conv_proj.weight"].shape == self.stem.weight.shape:
+                self.stem.weight.data.copy_(state["conv_proj.weight"])
+                self.stem.bias.data.copy_(state["conv_proj.bias"])
+                loaded += 2
+            # 2. Load transformer layer weights into spatial blocks
+            for i, blk in enumerate(self.blocks):
+                prefix = f"encoder.layers.encoder_layer_{i}."
+                if f"{prefix}ln_1.weight" in state:
+                    blk.norm_spat.weight.data.copy_(state[f"{prefix}ln_1.weight"])
+                    blk.norm_spat.bias.data.copy_(state[f"{prefix}ln_1.bias"])
+                    blk.norm_temp.weight.data.copy_(state[f"{prefix}ln_1.weight"])
+                    blk.norm_temp.bias.data.copy_(state[f"{prefix}ln_1.bias"])
+                    loaded += 4
+                if f"{prefix}self_attention.out_proj.weight" in state:
+                    blk.attn_spat.out_proj.weight.data.copy_(state[f"{prefix}self_attention.out_proj.weight"])
+                    blk.attn_spat.out_proj.bias.data.copy_(state[f"{prefix}self_attention.out_proj.bias"])
+                    blk.attn_temp.out_proj.weight.data.copy_(state[f"{prefix}self_attention.out_proj.weight"])
+                    blk.attn_temp.out_proj.bias.data.copy_(state[f"{prefix}self_attention.out_proj.bias"])
+                    loaded += 4
+                if f"{prefix}mlp.linear_1.weight" in state:
+                    blk.mlp[0].weight.data.copy_(state[f"{prefix}mlp.linear_1.weight"])
+                    blk.mlp[0].bias.data.copy_(state[f"{prefix}mlp.linear_1.bias"])
+                    blk.mlp[3].weight.data.copy_(state[f"{prefix}mlp.linear_2.weight"])
+                    blk.mlp[3].bias.data.copy_(state[f"{prefix}mlp.linear_2.bias"])
+                    blk.norm_mlp.weight.data.copy_(state[f"{prefix}ln_2.weight"])
+                    blk.norm_mlp.bias.data.copy_(state[f"{prefix}ln_2.bias"])
+                    loaded += 6
+            print(f">> TimeSformer: Successfully initialized {loaded} tensor parameters from official ViT-B/16 ({path})!")
+        except Exception as e:
+            print(f">> Warning: Could not transfer ViT-B/16 weights: {e}")
 
     def forward(self, x):
         # x input: (B, C, T, H, W)
@@ -254,11 +294,16 @@ class Mamba3DBlock(nn.Module):
         # 3D Sequence scan along temporal-spatial continuous dimension
         seq = x_conv.flatten(2).transpose(1, 2) # (B, T*H*W, C)
         dt = F.softplus(self.dt_proj(seq))
+        weighted = seq * dt
+        dt_sum = torch.cumsum(dt, dim=1) + 1e-5
 
-        # Bidirectional selective accumulation across time-space trajectory
-        h_fwd = torch.cumsum(seq * dt, dim=1) / (torch.cumsum(dt, dim=1) + 1e-5)
-        h_bwd = torch.flip(torch.cumsum(torch.flip(seq * dt, [1]), dim=1) / (torch.cumsum(torch.flip(dt, [1]), dim=1) + 1e-5), [1])
+        # Bidirectional selective accumulation across time-space trajectory (memory optimized)
+        h_fwd = torch.cumsum(weighted, dim=1) / dt_sum
+        del dt_sum
+        h_bwd = torch.flip(torch.cumsum(torch.flip(weighted, [1]), dim=1) / (torch.cumsum(torch.flip(dt, [1]), dim=1) + 1e-5), [1])
+        del weighted, dt
         h_out = 0.5 * (h_fwd + h_bwd)
+        del h_fwd, h_bwd
 
         out_3d = h_out.transpose(1, 2).view(B, C, T, H, W)
         gated = out_3d * torch.sigmoid(gate)

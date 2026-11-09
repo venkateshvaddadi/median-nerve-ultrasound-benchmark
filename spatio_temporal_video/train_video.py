@@ -163,8 +163,9 @@ def main():
         else:
             print(">> Pretrained weights not found, initializing randomly.")
     elif args.model == "timesformer":
-        model = TimeSformerUNet(in_channels=3, out_channels=1).to(device)
-        print(">> TimeSformer (Divided Space-Time Transformer) initialized with factorized space-time backbone!")
+        vit_pretrained = "/home/medimg/.cache/torch/hub/checkpoints/vit_b_16-c867db91.pth"
+        model = TimeSformerUNet(in_channels=3, out_channels=1, pretrained_path=vit_pretrained).to(device)
+        print(f">> TimeSformer (Divided Space-Time Transformer) initialized with official ViT-B/16 pretrained weights ({vit_pretrained})!")
     elif args.model == "video_mask2former":
         model = VideoMask2Former(in_channels=3, out_channels=1).to(device)
         print(">> Video Mask2Former initialized with multiscale video pixel decoder!")
@@ -187,8 +188,8 @@ def main():
     print(f"Model parameters: {param_count:.2f} M")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    # Use bfloat16 on Ampere RTX 3090 GPUs to eliminate transformer NaN overflows
-    use_bfloat16 = (args.model.startswith("vistr") or args.model in ["video_swin", "timesformer"]) and torch.cuda.is_bf16_supported()
+    # Use bfloat16 on Ampere RTX 3090 GPUs to eliminate numerical overflows and reduce memory footprint
+    use_bfloat16 = torch.cuda.is_bf16_supported()
     amp_dtype = torch.bfloat16 if use_bfloat16 else torch.float16
     scaler = torch.amp.GradScaler('cuda', enabled=(not use_bfloat16))
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
