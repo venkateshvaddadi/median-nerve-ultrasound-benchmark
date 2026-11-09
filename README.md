@@ -46,7 +46,7 @@ Evaluated on held-out test cohort (**Patients 90–99**, complete 300 continuous
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
 | **Modified VisTR (R50)** | ImageNet ResNet-50 | **56.75 M** | **84.86 ± 10.47** | **74.76 ± 11.95** | 81.55 ± 13.14 | **90.08 ± 11.64** | **1.670 ± 1.376** |
 | **Modified VisTR (R18)** | ImageNet ResNet-18 | **43.74 M** | **83.26 ± 10.77** | **72.44 ± 12.45** | 78.24 ± 13.62 | **90.71 ± 11.64** | **2.001 ± 1.521** |
-| **VideoSwinUNet** | Official 3D Swin (`model_swinvit.pt`) | **62.19 M** | **82.26 ± 16.34** | **72.25 ± 17.65** | **84.04 ± 16.92** | 82.86 ± 18.94 | **1.840 ± 2.129** |
+| **VideoSwinUNet** | Official 3D Swin (`model_swinvit.pt`) | **62.19 M** | **82.86 ± 16.00** | **73.05 ± 17.38** | 82.64 ± 17.30 | 84.95 ± 17.73 | **1.701 ± 1.877** |
 | **Modified VisTR (R101)** | ImageNet ResNet-101 | **75.91 M** | *Queued post-R50* | *Queued* | *Queued* | *Queued* | *Queued* |
 
 ### 2. SOTA Vision Transformers & Mamba (Golden Synergy Pipeline)
