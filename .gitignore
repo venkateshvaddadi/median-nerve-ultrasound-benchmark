@@ -1,0 +1,51 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Heavy Weights, Checkpoints & Datasets
+*.pth
+*.pt
+*.ckpt
+*.bin
+*.onnx
+*.engine
+*.tar.gz
+*.zip
+
+# Clinical Datasets & Raw Media
+*.jpg
+*.jpeg
+*.png
+*.tif
+*.tiff
+*.bmp
+*.dcm
+*.mp4
+*.avi
+*.mkv
+
+# Training Logs, Output dumps & Artifacts
+*.log
+*.csv
+runs/
+logs/
+checkpoints/
+pretrained_weights/
+results/
+video_benchmark_results/
+golden_benchmark_results/
+classical_benchmark_results/
+
+# Environments & OS specific
+.venv/
+venv/
+env/
+.env
+.DS_Store
+.idea/
+.vscode/
+build/
