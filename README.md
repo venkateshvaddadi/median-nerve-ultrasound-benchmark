@@ -44,9 +44,10 @@ Evaluated on held-out test cohort (**Patients 90–99**, complete 300 continuous
 ### 1. Spatio-Temporal Video Benchmark
 | Model | Backbone / Weights | Parameters | Test Dice (%) | Test IoU (%) | Precision (%) | Recall (%) | CSA Error ($\text{mm}^2$) |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Modified VisTR** | ImageNet ResNet-18 | **43.74 M** | **83.26 ± 10.77** | **72.44 ± 12.45** | 78.24 ± 13.62 | **90.71 ± 11.64** | **2.001 ± 1.521** |
-| **VideoSwinUNet** | Official 3D Swin (`model_swinvit.pt`) | **62.19 M** | **75.73 ± 22.13** | **64.86 ± 22.48** | **80.78 ± 22.23** | 74.25 ± 24.57 | 2.402 ± 2.690 |
-| **Modified VisTR (R50)** | ImageNet ResNet-50 | **56.75 M** | *In Progress* | *In Progress* | *In Progress* | *In Progress* | *In Progress* |
+| **Modified VisTR (R50)** | ImageNet ResNet-50 | **56.75 M** | **84.86 ± 10.47** | **74.76 ± 11.95** | 81.55 ± 13.14 | **90.08 ± 11.64** | **1.670 ± 1.376** |
+| **Modified VisTR (R18)** | ImageNet ResNet-18 | **43.74 M** | **83.26 ± 10.77** | **72.44 ± 12.45** | 78.24 ± 13.62 | **90.71 ± 11.64** | **2.001 ± 1.521** |
+| **VideoSwinUNet** | Official 3D Swin (`model_swinvit.pt`) | **62.19 M** | **80.27 ± 18.05** | **69.86 ± 19.07** | **84.67 ± 18.83** | 78.59 ± 20.36 | **2.030 ± 2.303** |
+| **Modified VisTR (R101)** | ImageNet ResNet-101 | **75.91 M** | *Queued post-R50* | *Queued* | *Queued* | *Queued* | *Queued* |
 
 ### 2. SOTA Vision Transformers & Mamba (Golden Synergy Pipeline)
 | Model | Paradigm | Parameters | Test Dice (%) | Test IoU (%) | Precision (%) | Recall (%) | CSA Error ($\text{mm}^2$) |
