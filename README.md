@@ -42,12 +42,14 @@ median-nerve-ultrasound-benchmark/
 Evaluated on held-out test cohort (**Patients 90–99**, complete 300 continuous frames per subject) with strict patient-level disjoint boundary isolation.
 
 ### 1. Spatio-Temporal Video Benchmark
-| Model | Backbone / Weights | Parameters | Test Dice (%) | Test IoU (%) | Precision (%) | Recall (%) | CSA Error ($\text{mm}^2$) |
+| Model | Paradigm / Backbone | Parameters | Test Dice (%) | Test IoU (%) | Precision (%) | Recall (%) | CSA Error ($\text{mm}^2$) |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Modified VisTR (R101)** | ImageNet ResNet-101 | **75.69 M** | **87.04 ± 8.56** | **77.79 ± 9.91** | **83.89 ± 10.90** | **91.40 ± 9.37** | **1.331 ± 1.174** |
-| **Modified VisTR (R50)** | ImageNet ResNet-50 | **56.75 M** | **84.86 ± 10.47** | **74.76 ± 11.95** | 81.55 ± 13.14 | **90.08 ± 11.64** | **1.670 ± 1.376** |
-| **Modified VisTR (R18)** | ImageNet ResNet-18 | **43.74 M** | **83.26 ± 10.77** | **72.44 ± 12.45** | 78.24 ± 13.62 | **90.71 ± 11.64** | **2.001 ± 1.521** |
-| **VideoSwinUNet** | Official 3D Swin (`model_swinvit.pt`) | **62.19 M** | **82.86 ± 16.00** | **73.05 ± 17.38** | 82.64 ± 17.30 | 84.95 ± 17.73 | **1.701 ± 1.877** |
+| **SAM 2 / MemSAM** 🥇 | **Streaming Memory Video ViT (ResNet-34)** | **10.22 M** | **91.61 ± 7.43** | **85.05 ± 8.05** | **89.03 ± 8.20** | **94.63 ± 8.06** | **0.782 ± 0.621** |
+| **Modified VisTR (R101)** 🥈 | Spatio-Temporal DETR (ResNet-101) | **75.69 M** | **87.04 ± 8.56** | **77.79 ± 9.91** | **83.89 ± 10.90** | **91.40 ± 9.37** | **1.331 ± 1.174** |
+| **Video-Mask2Former** 🥉 | 3D Mask Query Transformer (ResNet-50) | **11.43 M** | **85.54 ± 11.83** | **76.08 ± 13.40** | **87.85 ± 13.19** | 84.99 ± 14.04 | **1.446 ± 1.552** |
+| **Modified VisTR (R50)** | Spatio-Temporal DETR (ResNet-50) | **56.75 M** | 84.86 ± 10.47 | 74.76 ± 11.95 | 81.55 ± 13.14 | 90.08 ± 11.64 | 1.670 ± 1.376 |
+| **Modified VisTR (R18)** | Spatio-Temporal DETR (ResNet-18) | **43.74 M** | 83.26 ± 10.77 | 72.44 ± 12.45 | 78.24 ± 13.62 | 90.71 ± 11.64 | 2.001 ± 1.521 |
+| **VideoSwinUNet** | 3D Shifted-Window ViT (`model_swinvit.pt`) | **62.19 M** | 82.86 ± 16.00 | 73.05 ± 17.38 | 82.64 ± 17.30 | 84.95 ± 17.73 | 1.701 ± 1.877 |
 
 ### 2. SOTA Vision Transformers & Mamba (Golden Synergy Pipeline)
 | Model | Paradigm | Parameters | Test Dice (%) | Test IoU (%) | Precision (%) | Recall (%) | CSA Error ($\text{mm}^2$) |
