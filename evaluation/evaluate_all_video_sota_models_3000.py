@@ -297,22 +297,63 @@ if __name__ == "__main__":
     parser.add_argument("--output_csv", type=str, default=None)
     args = parser.parse_args()
 
-    # Default checkpoint locations
+    # Default checkpoint locations with multi-directory fallback
     if args.ckpt is None:
-        ckpt_map = {
-            "vistr_resnet101": "/home/medimg/video_benchmark_results/vistr_resnet101_benchmark/best_vistr_resnet101.pth",
-            "vistr_resnet50": "/home/medimg/video_benchmark_results/vistr_resnet50_benchmark/best_vistr_resnet50.pth",
-            "vistr_resnet18": "/home/medimg/video_benchmark_results/vistr_resnet18_benchmark/best_vistr_resnet18.pth",
-            "video_mask2former": "/home/medimg/video_benchmark_results/video_mask2former_benchmark/best_video_mask2former.pth",
-            "sam2": "/home/medimg/video_benchmark_results/sam2_benchmark/best_sam2.pth",
-            "memsam": "/home/medimg/video_benchmark_results/sam2_benchmark/best_sam2.pth",
-            "tubeformer": "/home/medimg/video_benchmark_results/tubeformer_benchmark/best_tubeformer.pth",
-            "tubedetr": "/home/medimg/video_benchmark_results/tubedetr_benchmark/best_tubedetr.pth",
-            "original_tubedetr": "/home/medimg/video_benchmark_results/tubedetr_benchmark/best_tubedetr.pth",
-            "video_swin": "/home/medimg/video_benchmark_results/video_swin_benchmark/best_video_swin.pth",
-            "video_mamba": "/home/medimg/video_benchmark_results/video_mamba_benchmark/best_video_mamba.pth",
-            "timesformer": "/home/medimg/video_benchmark_results/timesformer_benchmark/best_timesformer.pth"
+        ckpt_candidates = {
+            "vistr_resnet101": [
+                "/media/medimg/Data/venkatesh_data/Aster/experiement_10_ResUnet/video_benchmark_results/vistr_resnet101_benchmark/best_vistr_resnet101.pth",
+                "/home/medimg/video_benchmark_results/vistr_resnet101_benchmark/best_vistr_resnet101.pth"
+            ],
+            "vistr_resnet50": [
+                "/media/medimg/Data/venkatesh_data/Aster/experiement_10_ResUnet/video_benchmark_results/vistr_resnet50_benchmark/best_vistr_resnet50.pth",
+                "/home/medimg/video_benchmark_results/vistr_resnet50_benchmark/best_vistr_resnet50.pth"
+            ],
+            "vistr_resnet18": [
+                "/media/medimg/Data/venkatesh_data/Aster/experiement_10_ResUnet/video_benchmark_results/vistr_resnet18_benchmark/best_vistr_resnet18.pth",
+                "/home/medimg/video_benchmark_results/vistr_resnet18_benchmark/best_vistr_resnet18.pth"
+            ],
+            "video_mask2former": [
+                "/media/medimg/Data/venkatesh_data/Aster/experiement_10_ResUnet/video_benchmark_results/video_mask2former_benchmark/best_video_mask2former.pth",
+                "/home/medimg/video_benchmark_results/video_mask2former_benchmark/best_video_mask2former.pth"
+            ],
+            "sam2": [
+                "/media/medimg/Data/venkatesh_data/Aster/experiement_10_ResUnet/video_benchmark_results/sam2_benchmark/best_sam2.pth",
+                "/home/medimg/video_benchmark_results/sam2_benchmark/best_sam2.pth"
+            ],
+            "memsam": [
+                "/media/medimg/Data/venkatesh_data/Aster/experiement_10_ResUnet/video_benchmark_results/sam2_benchmark/best_sam2.pth",
+                "/home/medimg/video_benchmark_results/sam2_benchmark/best_sam2.pth"
+            ],
+            "tubeformer": [
+                "/home/medimg/video_benchmark_results/tubeformer_benchmark/best_tubeformer.pth",
+                "/media/medimg/Data/venkatesh_data/Aster/experiement_10_ResUnet/video_benchmark_results/tubeformer_benchmark/best_tubeformer.pth"
+            ],
+            "tubedetr": [
+                "/home/medimg/video_benchmark_results/tubedetr_benchmark/best_tubedetr.pth",
+                "/media/medimg/Data/venkatesh_data/Aster/experiement_10_ResUnet/video_benchmark_results/tubedetr_benchmark/best_tubedetr.pth"
+            ],
+            "original_tubedetr": [
+                "/home/medimg/video_benchmark_results/tubedetr_benchmark/best_tubedetr.pth",
+                "/media/medimg/Data/venkatesh_data/Aster/experiement_10_ResUnet/video_benchmark_results/tubedetr_benchmark/best_tubedetr.pth"
+            ],
+            "video_swin": [
+                "/media/medimg/Data/venkatesh_data/Aster/experiement_10_ResUnet/video_benchmark_results/video_swin_benchmark/best_video_swin.pth",
+                "/home/medimg/video_benchmark_results/video_swin_benchmark/best_video_swin.pth"
+            ],
+            "video_mamba": [
+                "/home/medimg/video_benchmark_results/video_mamba_benchmark/best_video_mamba.pth",
+                "/media/medimg/Data/venkatesh_data/Aster/experiement_10_ResUnet/video_benchmark_results/video_mamba_benchmark/best_video_mamba.pth"
+            ],
+            "timesformer": [
+                "/home/medimg/video_benchmark_results/timesformer_benchmark/best_timesformer.pth",
+                "/media/medimg/Data/venkatesh_data/Aster/experiement_10_ResUnet/video_benchmark_results/timesformer_benchmark/best_timesformer.pth"
+            ]
         }
-        args.ckpt = ckpt_map[args.model]
+        for cand in ckpt_candidates.get(args.model, []):
+            if os.path.exists(cand):
+                args.ckpt = cand
+                break
+        if args.ckpt is None:
+            raise FileNotFoundError(f"Could not locate checkpoint for {args.model}.")
 
     evaluate_model(args.model, args.ckpt, args.device, args.data_root, args.output_csv)
