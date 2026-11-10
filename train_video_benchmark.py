@@ -23,7 +23,7 @@ from torch.utils.data import DataLoader
 from sota_models.video_dataset import VideoAsterDataset
 from sota_models.video_sota_models import (
     VideoMambaUNet, get_modified_vistr, VideoSwinUNet, TimeSformerUNet,
-    VideoMask2Former, SAM2MemSAM, STCNXMemUNet, FlowGuidedEchoUNet, TubeFormer, get_video_model
+    VideoMask2Former, SAM2MemSAM, STCNXMemUNet, FlowGuidedEchoUNet, TubeFormer, OriginalTubeDETR, get_video_model
 )
 from models.VisTR.util.misc import NestedTensor
 
@@ -64,7 +64,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train Video Segmentation Models")
     parser.add_argument("--model", type=str, required=True, choices=[
         "vistr", "vistr_resnet50", "vistr_resnet101", "video_mamba", "video_swin",
-        "timesformer", "video_mask2former", "tubeformer", "sam2", "stcn", "flow_guided"
+        "timesformer", "video_mask2former", "tubeformer", "tubedetr", "original_tubedetr", "sam2", "stcn", "flow_guided"
     ])
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--epochs", type=int, default=25)
@@ -167,14 +167,22 @@ def main():
         model = TimeSformerUNet(in_channels=3, out_channels=1, pretrained_path=vit_pretrained).to(device)
         print(f">> TimeSformer (Divided Space-Time Transformer) initialized with official ViT-B/16 pretrained weights ({vit_pretrained})!")
     elif args.model == "video_mask2former":
-        model = VideoMask2Former(in_channels=3, out_channels=1).to(device)
-        print(">> Video Mask2Former initialized with multiscale video pixel decoder!")
+        resnet_pretrained = "/home/medimg/.cache/torch/hub/checkpoints/resnet50-0676ba61.pth"
+        model = VideoMask2Former(in_channels=3, out_channels=1, pretrained_path=resnet_pretrained).to(device)
+        print(f">> Video Mask2Former initialized with ImageNet-1K pretrained ResNet-50 backbone ({resnet_pretrained})!")
+    elif args.model in ["tubedetr", "original_tubedetr", "tubedetr_original"]:
+        mdetr_pretrained = "/media/medimg/Data/venkatesh_data/Aster/experiement_10_ResUnet/pretrained_weights/pretrained_resnet101_checkpoint.pth"
+        res101_hub = "/home/medimg/.cache/torch/hub/checkpoints/resnet101-63fe2227.pth"
+        chosen_ckpt = mdetr_pretrained if os.path.exists(mdetr_pretrained) else res101_hub
+        model = OriginalTubeDETR(in_channels=3, out_channels=1, hidden_dim=256, num_tube_queries=16, backbone_pretrained=chosen_ckpt).to(device)
+        print(f">> Original TubeDETR initialized with pretrained ResNet-101 ({chosen_ckpt}) and Spatio-Temporal DETR Transformer!")
     elif args.model == "tubeformer":
         model = TubeFormer(in_channels=3, out_channels=1).to(device)
         print(">> TubeFormer initialized with 3D space-time tube cross-attention!")
     elif args.model == "sam2":
-        model = SAM2MemSAM(in_channels=3, out_channels=1).to(device)
-        print(">> SAM2 / MemSAM initialized with video memory bank!")
+        res34_pretrained = "/home/medimg/.cache/torch/hub/checkpoints/resnet34-b627a593.pth"
+        model = SAM2MemSAM(in_channels=3, out_channels=1, pretrained_path=res34_pretrained).to(device)
+        print(f">> SAM2 / MemSAM initialized with ImageNet-1K pretrained ResNet-34 backbone ({res34_pretrained})!")
     elif args.model == "stcn":
         model = STCNXMemUNet(in_channels=3, out_channels=1).to(device)
         print(">> STCN / XMem initialized with space-time memory matching!")
@@ -262,23 +270,28 @@ def main():
                     with torch.amp.autocast('cuda', dtype=amp_dtype, enabled=True):
                         out = model(samples)
                     pred_masks = torch.sigmoid(torch.clamp(out["pred_masks"].float(), min=-30.0, max=30.0))
+                if args.model.startswith("vistr"):
                     pred_masks_up = F.interpolate(pred_masks, size=(H, W), mode='bilinear', align_corners=False)
-                    pred_bin = (pred_masks_up > 0.5).cpu().numpy().astype(np.uint8)
-                    gt_bin = (mask_clip.squeeze(1) > 0.5).numpy().astype(np.uint8)
+                    # Vectorized GPU Dice calculation
+                    tgt_masks = mask_clip.squeeze(1).to(device)
+                    pred_bin = (pred_masks_up > 0.5).float()
+                    gt_bin = (tgt_masks > 0.5).float()
+                    inter = (pred_bin * gt_bin).sum(dim=(1, 2, 3))
+                    union = pred_bin.sum(dim=(1, 2, 3)) + gt_bin.sum(dim=(1, 2, 3))
+                    batch_dice = (2.0 * inter + 1e-5) / (union + 1e-5)
+                    val_dice_list.extend(batch_dice.cpu().numpy().tolist())
                 else:
                     x_clip_down = F.interpolate(x_clip, size=(T, 224, 160), mode='trilinear', align_corners=False).to(device)
+                    mask_down = F.interpolate(mask_clip, size=(T, 224, 160), mode='nearest').to(device)
                     with torch.amp.autocast('cuda', dtype=amp_dtype, enabled=True):
                         preds_down = torch.sigmoid(torch.clamp(model(x_clip_down), min=-30.0, max=30.0))
-                    preds = F.interpolate(preds_down, size=(T, H, W), mode='trilinear', align_corners=False)
-                    pred_bin = (preds > 0.5).cpu().numpy().astype(np.uint8)
-                    gt_bin = (mask_clip > 0.5).numpy().astype(np.uint8)
-
-                for b in range(B):
-                    for t in range(T):
-                        pb = pred_bin[b, t] if args.model.startswith("vistr") else pred_bin[b, 0, t]
-                        gb = gt_bin[b, t] if args.model.startswith("vistr") else gt_bin[b, 0, t]
-                        m = compute_detailed_metrics(pb, gb)
-                        val_dice_list.append(m["dice"])
+                    # Vectorized GPU Dice calculation
+                    pred_bin = (preds_down > 0.5).float()
+                    gt_bin = (mask_down > 0.5).float()
+                    inter = (pred_bin * gt_bin).sum(dim=(1, 2, 3, 4))
+                    union = pred_bin.sum(dim=(1, 2, 3, 4)) + gt_bin.sum(dim=(1, 2, 3, 4))
+                    batch_dice = (2.0 * inter + 1e-5) / (union + 1e-5)
+                    val_dice_list.extend(batch_dice.cpu().numpy().tolist())
 
         val_dice = np.mean(val_dice_list) * 100.0 if val_dice_list else 0.0
         elapsed = time.time() - t0

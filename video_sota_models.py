@@ -11,6 +11,7 @@ Includes:
 """
 
 import os
+import sys
 import math
 import torch
 import torch.nn as nn
@@ -175,64 +176,24 @@ class DividedSpaceTimeBlock(nn.Module):
 class TimeSformerUNet(nn.Module):
     """
     Spatio-Temporal Video Segmentation Transformer with Divided Space-Time Attention.
-    Initializes spatial attention and patch projection from official ViT-B/16 pretrained weights.
     """
-    def __init__(self, in_channels=3, out_channels=1, embed_dim=768, depth=8, patch_size=16, pretrained_path=None):
+    def __init__(self, in_channels=3, out_channels=1, embed_dim=256, depth=4, patch_size=16):
         super().__init__()
         self.patch_size = patch_size
         self.embed_dim = embed_dim
         self.stem = nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size)
 
         self.blocks = nn.ModuleList([
-            DividedSpaceTimeBlock(dim=embed_dim, num_heads=12) for _ in range(depth)
+            DividedSpaceTimeBlock(dim=embed_dim, num_heads=8) for _ in range(depth)
         ])
         self.norm = nn.LayerNorm(embed_dim)
 
         # Decoder to restore original frame resolution
-        self.dec1 = nn.ConvTranspose2d(embed_dim, 256, kernel_size=2, stride=2)
-        self.dec2 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
-        self.dec3 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
-        self.dec4 = nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2)
-        self.head = nn.Conv2d(32, out_channels, kernel_size=1)
-
-        if pretrained_path and os.path.exists(pretrained_path):
-            self.load_pretrained_vit(pretrained_path)
-
-    def load_pretrained_vit(self, path):
-        try:
-            state = torch.load(path, map_location='cpu', weights_only=False)
-            loaded = 0
-            # 1. Load stem projection
-            if "conv_proj.weight" in state and state["conv_proj.weight"].shape == self.stem.weight.shape:
-                self.stem.weight.data.copy_(state["conv_proj.weight"])
-                self.stem.bias.data.copy_(state["conv_proj.bias"])
-                loaded += 2
-            # 2. Load transformer layer weights into spatial blocks
-            for i, blk in enumerate(self.blocks):
-                prefix = f"encoder.layers.encoder_layer_{i}."
-                if f"{prefix}ln_1.weight" in state:
-                    blk.norm_spat.weight.data.copy_(state[f"{prefix}ln_1.weight"])
-                    blk.norm_spat.bias.data.copy_(state[f"{prefix}ln_1.bias"])
-                    blk.norm_temp.weight.data.copy_(state[f"{prefix}ln_1.weight"])
-                    blk.norm_temp.bias.data.copy_(state[f"{prefix}ln_1.bias"])
-                    loaded += 4
-                if f"{prefix}self_attention.out_proj.weight" in state:
-                    blk.attn_spat.out_proj.weight.data.copy_(state[f"{prefix}self_attention.out_proj.weight"])
-                    blk.attn_spat.out_proj.bias.data.copy_(state[f"{prefix}self_attention.out_proj.bias"])
-                    blk.attn_temp.out_proj.weight.data.copy_(state[f"{prefix}self_attention.out_proj.weight"])
-                    blk.attn_temp.out_proj.bias.data.copy_(state[f"{prefix}self_attention.out_proj.bias"])
-                    loaded += 4
-                if f"{prefix}mlp.linear_1.weight" in state:
-                    blk.mlp[0].weight.data.copy_(state[f"{prefix}mlp.linear_1.weight"])
-                    blk.mlp[0].bias.data.copy_(state[f"{prefix}mlp.linear_1.bias"])
-                    blk.mlp[3].weight.data.copy_(state[f"{prefix}mlp.linear_2.weight"])
-                    blk.mlp[3].bias.data.copy_(state[f"{prefix}mlp.linear_2.bias"])
-                    blk.norm_mlp.weight.data.copy_(state[f"{prefix}ln_2.weight"])
-                    blk.norm_mlp.bias.data.copy_(state[f"{prefix}ln_2.bias"])
-                    loaded += 6
-            print(f">> TimeSformer: Successfully initialized {loaded} tensor parameters from official ViT-B/16 ({path})!")
-        except Exception as e:
-            print(f">> Warning: Could not transfer ViT-B/16 weights: {e}")
+        self.dec1 = nn.ConvTranspose2d(embed_dim, 128, kernel_size=2, stride=2)
+        self.dec2 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
+        self.dec3 = nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2)
+        self.dec4 = nn.ConvTranspose2d(32, 16, kernel_size=2, stride=2)
+        self.head = nn.Conv2d(16, out_channels, kernel_size=1)
 
     def forward(self, x):
         # x input: (B, C, T, H, W)
@@ -294,16 +255,11 @@ class Mamba3DBlock(nn.Module):
         # 3D Sequence scan along temporal-spatial continuous dimension
         seq = x_conv.flatten(2).transpose(1, 2) # (B, T*H*W, C)
         dt = F.softplus(self.dt_proj(seq))
-        weighted = seq * dt
-        dt_sum = torch.cumsum(dt, dim=1) + 1e-5
 
-        # Bidirectional selective accumulation across time-space trajectory (memory optimized)
-        h_fwd = torch.cumsum(weighted, dim=1) / dt_sum
-        del dt_sum
-        h_bwd = torch.flip(torch.cumsum(torch.flip(weighted, [1]), dim=1) / (torch.cumsum(torch.flip(dt, [1]), dim=1) + 1e-5), [1])
-        del weighted, dt
+        # Bidirectional selective accumulation across time-space trajectory
+        h_fwd = torch.cumsum(seq * dt, dim=1) / (torch.cumsum(dt, dim=1) + 1e-5)
+        h_bwd = torch.flip(torch.cumsum(torch.flip(seq * dt, [1]), dim=1) / (torch.cumsum(torch.flip(dt, [1]), dim=1) + 1e-5), [1])
         h_out = 0.5 * (h_fwd + h_bwd)
-        del h_fwd, h_bwd
 
         out_3d = h_out.transpose(1, 2).view(B, C, T, H, W)
         gated = out_3d * torch.sigmoid(gate)
@@ -364,43 +320,47 @@ class VideoMambaUNet(nn.Module):
 class VideoMask2Former(nn.Module):
     """
     Video-Mask2Former: Treats video segmentation as 3D spatio-temporal tube mask classification.
-    Learns continuous 3D mask queries that cross-attend to multi-scale spatio-temporal features.
+    - Backbone: ImageNet-1K Pretrained ResNet-50 extracting multi-scale per-frame feature maps.
+    - Pixel Decoder: 3D spatio-temporal FPN multi-scale feature aggregator.
+    - Transformer Decoder: Learnable spatio-temporal queries with masked cross-attention.
     """
-    def __init__(self, in_channels=3, out_channels=1, num_queries=8, hidden_dim=128):
+    def __init__(self, in_channels=3, out_channels=1, num_queries=8, hidden_dim=256, pretrained_path=None):
         super().__init__()
         self.num_queries = num_queries
         self.hidden_dim = hidden_dim
 
-        # Multi-scale 3D spatio-temporal encoder backbone
-        self.enc1 = nn.Sequential(
-            nn.Conv3d(in_channels, 32, kernel_size=(3, 3, 3), padding=(1, 1, 1)),
-            nn.BatchNorm3d(32),
-            nn.SiLU(inplace=True),
-            nn.Conv3d(32, 32, kernel_size=(3, 3, 3), padding=(1, 1, 1)),
-            nn.BatchNorm3d(32),
-            nn.SiLU(inplace=True)
-        )
-        self.down1 = nn.Conv3d(32, 64, kernel_size=(1, 2, 2), stride=(1, 2, 2))
+        # Load ResNet-50 backbone
+        import torchvision.models as models
+        res = models.resnet50(weights=None)
+        if pretrained_path and os.path.exists(pretrained_path):
+            state = torch.load(pretrained_path, map_location='cpu')
+            if 'model' in state:
+                state = state['model']
+            res.load_state_dict(state, strict=False)
+            print(f">> VideoMask2Former: Successfully loaded ImageNet pretrained weights from {pretrained_path}!")
+        elif os.path.exists('/home/medimg/.cache/torch/hub/checkpoints/resnet50-0676ba61.pth'):
+            p = '/home/medimg/.cache/torch/hub/checkpoints/resnet50-0676ba61.pth'
+            state = torch.load(p, map_location='cpu')
+            res.load_state_dict(state, strict=False)
+            print(f">> VideoMask2Former: Successfully loaded ImageNet pretrained weights from {p}!")
 
-        self.enc2 = nn.Sequential(
-            nn.Conv3d(64, 64, kernel_size=(3, 3, 3), padding=(1, 1, 1)),
-            nn.BatchNorm3d(64),
-            nn.SiLU(inplace=True)
-        )
-        self.down2 = nn.Conv3d(64, hidden_dim, kernel_size=(1, 2, 2), stride=(1, 2, 2))
+        self.conv1 = res.conv1
+        self.bn1 = res.bn1
+        self.relu = res.relu
+        self.maxpool = res.maxpool
+        self.layer1 = res.layer1 # 256 ch, 1/4
+        self.layer2 = res.layer2 # 512 ch, 1/8
+        self.layer3 = res.layer3 # 1024 ch, 1/16
 
-        # 3D Pixel Decoder: project features to hidden_dim
-        self.pixel_decoder = nn.Sequential(
-            nn.Conv3d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
-            nn.BatchNorm3d(hidden_dim),
-            nn.SiLU(inplace=True)
-        )
+        # Multi-scale 3D spatio-temporal pixel decoder (FPN)
+        self.lateral3 = nn.Conv3d(1024, hidden_dim, kernel_size=1)
+        self.lateral2 = nn.Conv3d(512, hidden_dim, kernel_size=1)
+        self.lateral1 = nn.Conv3d(256, hidden_dim, kernel_size=1)
+        self.smooth = nn.Conv3d(hidden_dim, hidden_dim, kernel_size=3, padding=1)
 
-        # Learnable 3D spatio-temporal queries (num_queries, hidden_dim)
+        # Spatio-temporal queries
         self.query_embed = nn.Embedding(num_queries, hidden_dim)
-
-        # Cross-attention: queries attend to spatio-temporal pixel decoder features
-        self.cross_attn = nn.MultiheadAttention(embed_dim=hidden_dim, num_heads=4, batch_first=True)
+        self.cross_attn = nn.MultiheadAttention(embed_dim=hidden_dim, num_heads=8, batch_first=True)
         self.norm1 = nn.LayerNorm(hidden_dim)
         self.norm2 = nn.LayerNorm(hidden_dim)
         self.mlp = nn.Sequential(
@@ -409,7 +369,6 @@ class VideoMask2Former(nn.Module):
             nn.Linear(hidden_dim * 2, hidden_dim)
         )
 
-        # Query mask projector and binary classification score head
         self.mask_embed = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
@@ -417,44 +376,44 @@ class VideoMask2Former(nn.Module):
         )
         self.cls_head = nn.Linear(hidden_dim, 1)
 
-        # Final upsampling head back to original (T, H, W)
-        self.up_final = nn.Sequential(
-            nn.ConvTranspose3d(1, 1, kernel_size=(1, 4, 4), stride=(1, 4, 4)),
-            nn.Conv3d(1, out_channels, kernel_size=3, padding=1)
-        )
-
     def forward(self, x):
         # x: (B, C, T, H, W)
         B, C, T, H, W = x.shape
-        e1 = self.enc1(x)
-        e2 = self.enc2(self.down1(e1))
-        e3 = self.pixel_decoder(self.down2(e2)) # (B, hidden_dim, T, H/4, W/4)
+        x_flat = x.permute(0, 2, 1, 3, 4).contiguous().view(B * T, C, H, W)
+        c1 = self.relu(self.bn1(self.conv1(x_flat)))
+        c1_p = self.maxpool(c1)
+        l1 = self.layer1(c1_p) # (B*T, 256, H/4, W/4)
+        l2 = self.layer2(l1)   # (B*T, 512, H/8, W/8)
+        l3 = self.layer3(l2)   # (B*T, 1024, H/16, W/16)
 
-        B_sz, C_hid, T_sz, H_sub, W_sub = e3.shape
-        # Flatten spatio-temporal features: (B, T * H_sub * W_sub, hidden_dim)
-        feats_flat = e3.permute(0, 2, 3, 4, 1).contiguous().view(B_sz, T_sz * H_sub * W_sub, C_hid)
+        _, _, H4, W4 = l1.shape
+        _, _, H8, W8 = l2.shape
+        _, _, H16, W16 = l3.shape
 
-        # Expand queries: (B, num_queries, hidden_dim)
-        queries = self.query_embed.weight.unsqueeze(0).expand(B_sz, -1, -1)
+        # Reshape to 3D video tensors (B, C, T, H, W)
+        v1 = l1.view(B, T, 256, H4, W4).permute(0, 2, 1, 3, 4)
+        v2 = l2.view(B, T, 512, H8, W8).permute(0, 2, 1, 3, 4)
+        v3 = l3.view(B, T, 1024, H16, W16).permute(0, 2, 1, 3, 4)
 
-        # Masked Spatio-Temporal Cross Attention
+        # 3D Feature Pyramid Pixel Decoder
+        p3 = self.lateral3(v3)
+        p2 = self.lateral2(v2) + F.interpolate(p3, size=(T, H8, W8), mode="trilinear", align_corners=False)
+        p1 = self.lateral1(v1) + F.interpolate(p2, size=(T, H4, W4), mode="trilinear", align_corners=False)
+        feats = self.smooth(p1) # (B, hidden_dim, T, H/4, W/4)
+
+        feats_flat = feats.permute(0, 2, 3, 4, 1).contiguous().view(B, T * H4 * W4, self.hidden_dim)
+        queries = self.query_embed.weight.unsqueeze(0).expand(B, -1, -1)
         q_norm = self.norm1(queries)
         attn_out, _ = self.cross_attn(q_norm, feats_flat, feats_flat)
         queries = queries + attn_out
         queries = queries + self.mlp(self.norm2(queries))
 
-        # Compute query mask embeddings: (B, num_queries, hidden_dim)
-        mask_embeddings = self.mask_embed(queries)
-        # Dot product with spatio-temporal feature map gives 3D query masks: (B, num_queries, T * H_sub * W_sub)
-        pred_masks_flat = torch.bmm(mask_embeddings, feats_flat.transpose(1, 2))
-        pred_masks = pred_masks_flat.view(B_sz, self.num_queries, T_sz, H_sub, W_sub)
-
-        # Attention weights over queries via cls_head
-        cls_scores = F.softmax(self.cls_head(queries).squeeze(-1), dim=-1) # (B, num_queries)
-        weighted_mask = torch.sum(pred_masks * cls_scores.view(B_sz, self.num_queries, 1, 1, 1), dim=1, keepdim=True) # (B, 1, T, H_sub, W_sub)
-
-        # Restore original (T, H, W) resolution
-        out = F.interpolate(weighted_mask, size=(T, H, W), mode='trilinear', align_corners=False)
+        mask_embeds = self.mask_embed(queries)
+        pred_masks_flat = torch.bmm(mask_embeds, feats_flat.transpose(1, 2))
+        pred_masks = pred_masks_flat.view(B, self.num_queries, T, H4, W4)
+        cls_scores = F.softmax(self.cls_head(queries).squeeze(-1), dim=-1)
+        weighted_mask = torch.sum(pred_masks * cls_scores.view(B, self.num_queries, 1, 1, 1), dim=1, keepdim=True)
+        out = F.interpolate(weighted_mask, size=(T, H, W), mode="trilinear", align_corners=False)
         return out
 
 
@@ -464,46 +423,75 @@ class VideoMask2Former(nn.Module):
 class SAM2MemSAM(nn.Module):
     """
     SAM 2 / MemSAM for Medical Ultrasound Video:
-    Streaming memory attention architecture. Maintains a temporal memory bank of past
-    frame embeddings to guide current frame segmentation, preventing drift and dropouts.
+    Streaming memory attention architecture with ImageNet-1K pretrained ResNet backbone.
+    Maintains a temporal memory bank of past frame embeddings to guide current frame
+    segmentation, preventing drift and dropouts.
     """
-    def __init__(self, in_channels=3, out_channels=1, embed_dim=128, memory_len=4):
+    def __init__(self, in_channels=3, out_channels=1, embed_dim=256, memory_len=4, pretrained_path=None):
         super().__init__()
         self.embed_dim = embed_dim
         self.memory_len = memory_len
 
-        # 2D Frame Encoder (Hierarchical lightweight ConvNet / ViT style)
-        self.frame_encoder = nn.Sequential(
-            nn.Conv2d(in_channels, 32, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(32),
-            nn.SiLU(inplace=True),
-            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(64),
-            nn.SiLU(inplace=True),
-            nn.Conv2d(64, embed_dim, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(embed_dim),
-            nn.SiLU(inplace=True)
-        )
+        # 2D Frame Encoder with ImageNet Pretrained ResNet Backbone
+        import torchvision.models as models
+        res = models.resnet34(weights=None)
+        if pretrained_path and os.path.exists(pretrained_path):
+            state = torch.load(pretrained_path, map_location='cpu')
+            if 'model' in state:
+                state = state['model']
+            res.load_state_dict(state, strict=False)
+            print(f">> SAM2MemSAM: Successfully loaded pretrained backbone from {pretrained_path}!")
+        elif os.path.exists('/home/medimg/.cache/torch/hub/checkpoints/resnet34-b627a593.pth'):
+            p = '/home/medimg/.cache/torch/hub/checkpoints/resnet34-b627a593.pth'
+            state = torch.load(p, map_location='cpu')
+            res.load_state_dict(state, strict=False)
+            print(f">> SAM2MemSAM: Successfully loaded pretrained backbone from {p}!")
+        elif os.path.exists('/home/venkatesh/.cache/torch/hub/checkpoints/resnet34-b627a593.pth'):
+            p = '/home/venkatesh/.cache/torch/hub/checkpoints/resnet34-b627a593.pth'
+            state = torch.load(p, map_location='cpu')
+            res.load_state_dict(state, strict=False)
+            print(f">> SAM2MemSAM: Successfully loaded pretrained backbone from {p}!")
 
-        # Memory Attention: Current frame queries attend to past memory bank key/values
-        self.mem_attn = nn.MultiheadAttention(embed_dim=embed_dim, num_heads=4, batch_first=True)
+        self.conv1 = res.conv1
+        self.bn1 = res.bn1
+        self.relu = res.relu
+        self.maxpool = res.maxpool
+        self.layer1 = res.layer1 # 64 ch, H/4, W/4
+        self.layer2 = res.layer2 # 128 ch, H/8, W/8
+        self.layer3 = res.layer3 # 256 ch, H/16, W/16
+
+        # Projection to memory embed dimension
+        self.proj = nn.Conv2d(256, embed_dim, kernel_size=1)
+
+        # Streaming Memory Attention: Queries attend to past frame memory embeddings
+        self.mem_attn = nn.MultiheadAttention(embed_dim=embed_dim, num_heads=8, batch_first=True)
         self.mem_norm = nn.LayerNorm(embed_dim)
 
-        # Memory Fusion & Mask Decoder
+        # Memory Fusion
         self.fusion = nn.Sequential(
             nn.Conv2d(embed_dim * 2, embed_dim, kernel_size=3, padding=1),
             nn.BatchNorm2d(embed_dim),
             nn.SiLU(inplace=True)
         )
 
-        self.mask_decoder = nn.Sequential(
-            nn.ConvTranspose2d(embed_dim, 64, kernel_size=2, stride=2),
+        # High-resolution multi-scale feature skip decoder
+        self.up3 = nn.ConvTranspose2d(embed_dim, 128, kernel_size=2, stride=2) # H/8
+        self.dec2 = nn.Sequential(
+            nn.Conv2d(128 + 128, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.SiLU(inplace=True)
+        )
+        self.up2 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2) # H/4
+        self.dec1 = nn.Sequential(
+            nn.Conv2d(64 + 64, 64, kernel_size=3, padding=1),
             nn.BatchNorm2d(64),
-            nn.SiLU(inplace=True),
-            nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2),
+            nn.SiLU(inplace=True)
+        )
+        self.up_final = nn.Sequential(
+            nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2), # H/2
             nn.BatchNorm2d(32),
             nn.SiLU(inplace=True),
-            nn.ConvTranspose2d(32, 16, kernel_size=2, stride=2),
+            nn.ConvTranspose2d(32, 16, kernel_size=2, stride=2), # H
             nn.BatchNorm2d(16),
             nn.SiLU(inplace=True),
             nn.Conv2d(16, out_channels, kernel_size=1)
@@ -513,35 +501,39 @@ class SAM2MemSAM(nn.Module):
         # x: (B, C, T, H, W)
         B, C, T, H, W = x.shape
         preds = []
-        memory_bank = [] # list of past frame feature tensors
+        memory_bank = []
 
         for t in range(T):
             frame_t = x[:, :, t, :, :] # (B, C, H, W)
-            feat_t = self.frame_encoder(frame_t) # (B, D, H_e, W_e)
+            c1 = self.relu(self.bn1(self.conv1(frame_t)))
+            c1_p = self.maxpool(c1)
+            f1 = self.layer1(c1_p) # (B, 64, H/4, W/4)
+            f2 = self.layer2(f1)   # (B, 128, H/8, W/8)
+            f3 = self.layer3(f2)   # (B, 256, H/16, W/16)
+
+            feat_t = self.proj(f3) # (B, embed_dim, H/16, W/16)
             B_f, D_f, H_e, W_e = feat_t.shape
-            feat_flat = feat_t.flatten(2).transpose(1, 2) # (B, H_e*W_e, D)
+            feat_flat = feat_t.flatten(2).transpose(1, 2) # (B, H_e*W_e, self.embed_dim)
 
             if len(memory_bank) == 0:
-                # First frame initialization: Self-memory condition
                 mem_context = feat_flat
             else:
-                # Memory Bank condition: concatenate past stored frames
-                mem_stack = torch.cat(memory_bank[-self.memory_len:], dim=1) # (B, k * tokens, D)
+                mem_stack = torch.cat(memory_bank[-self.memory_len:], dim=1)
                 norm_q = self.mem_norm(feat_flat)
                 attn_context, _ = self.mem_attn(norm_q, mem_stack, mem_stack)
                 mem_context = feat_flat + attn_context
 
-            # Update memory bank with current processed features
             memory_bank.append(feat_flat)
-
-            # Fuse current frame spatial features with streaming memory context
             ctx_spatial = mem_context.transpose(1, 2).view(B, D_f, H_e, W_e)
             fused = self.fusion(torch.cat([feat_t, ctx_spatial], dim=1))
-            mask_t = self.mask_decoder(fused) # (B, 1, H, W)
-            mask_t = F.interpolate(mask_t, size=(H, W), mode='bilinear', align_corners=False)
-            preds.append(mask_t.unsqueeze(2)) # (B, 1, 1, H, W)
 
-        return torch.cat(preds, dim=2) # (B, 1, T, H, W)
+            d2 = self.dec2(torch.cat([self.up3(fused), f2], dim=1))
+            d1 = self.dec1(torch.cat([self.up2(d2), f1], dim=1))
+            mask_t = self.up_final(d1)
+            mask_t = F.interpolate(mask_t, size=(H, W), mode='bilinear', align_corners=False)
+            preds.append(mask_t.unsqueeze(2))
+
+        return torch.cat(preds, dim=2)
 
 
 # ==============================================================================
@@ -550,24 +542,41 @@ class SAM2MemSAM(nn.Module):
 class STCNXMemUNet(nn.Module):
     """
     Space-Time Correspondence Network (STCN / XMem):
-    Computes dense non-local pixel-to-pixel space-time affinity matches between past memory
-    frames and the current query frame to propagate median nerve boundaries seamlessly.
+    Official STCN uses an ImageNet-pretrained ResNet backbone as the Key Encoder
+    to compute dense non-local pixel-to-pixel space-time affinity matches between past memory
+    frames and the current query frame.
     """
-    def __init__(self, in_channels=3, out_channels=1, key_dim=64, value_dim=128):
+    def __init__(self, in_channels=3, out_channels=1, key_dim=64, value_dim=128, pretrained_path=None):
         super().__init__()
         self.key_dim = key_dim
         self.value_dim = value_dim
 
-        # Key and Value encoders for space-time memory matching (1/16 resolution for memory efficiency)
-        self.key_encoder = nn.Sequential(
-            nn.Conv2d(in_channels, 32, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(64, key_dim, kernel_size=3, stride=4, padding=1)
-        )
+        # Key Encoder: ImageNet Pretrained ResNet-18 Backbone
+        import torchvision.models as models
+        res = models.resnet18(weights=None)
+        if pretrained_path and os.path.exists(pretrained_path):
+            state = torch.load(pretrained_path, map_location='cpu')
+            res.load_state_dict(state, strict=False)
+            print(f">> STCNXMem: Loaded pretrained key backbone from {pretrained_path}!")
+        elif os.path.exists('/home/medimg/.cache/torch/hub/checkpoints/resnet18-f37072fd.pth'):
+            p = '/home/medimg/.cache/torch/hub/checkpoints/resnet18-f37072fd.pth'
+            state = torch.load(p, map_location='cpu')
+            res.load_state_dict(state, strict=False)
+            print(f">> STCNXMem: Loaded pretrained key backbone from {p}!")
+        elif os.path.exists('/home/venkatesh/.cache/torch/hub/checkpoints/resnet18-f37072fd.pth'):
+            p = '/home/venkatesh/.cache/torch/hub/checkpoints/resnet18-f37072fd.pth'
+            state = torch.load(p, map_location='cpu')
+            res.load_state_dict(state, strict=False)
+            print(f">> STCNXMem: Loaded pretrained key backbone from {p}!")
+
+        # Key Encoder layers: down to 1/16 resolution
+        self.key_stem = nn.Sequential(res.conv1, res.bn1, res.relu, res.maxpool)
+        self.key_layer1 = res.layer1 # 64 ch, 1/4
+        self.key_layer2 = res.layer2 # 128 ch, 1/8
+        self.key_layer3 = res.layer3 # 256 ch, 1/16
+        self.key_proj = nn.Conv2d(256, key_dim, kernel_size=1)
+
+        # Value Encoder: lightweight value projection head
         self.value_encoder = nn.Sequential(
             nn.Conv2d(in_channels, 32, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(32),
@@ -601,8 +610,14 @@ class STCNXMemUNet(nn.Module):
 
         for t in range(T):
             cur_frame = x[:, :, t, :, :]
-            k_t = self.key_encoder(cur_frame) # (B, K, H/16, W/16)
-            v_t = self.value_encoder(cur_frame) # (B, V, H/16, W/16)
+            # Key extraction via Pretrained ResNet
+            x_stem = self.key_stem(cur_frame)
+            x_l1 = self.key_layer1(x_stem)
+            x_l2 = self.key_layer2(x_l1)
+            x_l3 = self.key_layer3(x_l2)
+            k_t = self.key_proj(x_l3) # (B, key_dim, H/16, W/16)
+
+            v_t = self.value_encoder(cur_frame) # (B, value_dim, H/16, W/16)
             B_s, _, H_s, W_s = k_t.shape
 
             k_flat = k_t.flatten(2).transpose(1, 2) # (B, N_s, K)
@@ -611,20 +626,16 @@ class STCNXMemUNet(nn.Module):
             if len(keys_mem) == 0:
                 readout_val = v_t
             else:
-                # Compute Space-Time Memory affinity across recent memory frames
                 all_keys = torch.cat(keys_mem[-max_mem_frames:], dim=1)
                 all_vals = torch.cat(vals_mem[-max_mem_frames:], dim=1)
-                affinity = torch.bmm(k_flat, all_keys.transpose(1, 2)) / math.sqrt(self.key_dim) # (B, N_s, M_total)
+                affinity = torch.bmm(k_flat, all_keys.transpose(1, 2)) / math.sqrt(self.key_dim)
                 aff_weights = F.softmax(affinity, dim=-1)
-                # Weighted readout from memory values: (B, N_s, V)
                 readout = torch.bmm(aff_weights, all_vals)
                 readout_val = readout.transpose(1, 2).view(B, self.value_dim, H_s, W_s) + v_t
 
-            # Store in short-term/working memory
             keys_mem.append(k_flat)
             vals_mem.append(v_flat)
 
-            # Decode to mask
             m_t = self.decoder(readout_val)
             m_t = F.interpolate(m_t, size=(H, W), mode='bilinear', align_corners=False)
             outputs.append(m_t.unsqueeze(2))
@@ -721,58 +732,95 @@ class FlowGuidedEchoUNet(nn.Module):
 class TubeFormer(nn.Module):
     """
     TubeDETR / Tube-Former:
-    Predicts continuous 3D cylindrical tubes across video frames.
-    Factorizes joint space-time cross-attention into temporal tube queries that bound the nerve path.
+    Uses an ImageNet-pretrained ResNet backbone per frame to extract robust anatomical features,
+    then factorizes joint space-time cross-attention via continuous 3D Spatio-Temporal Tube Queries
+    bounding the nerve trajectory through ultrasound sweeps.
     """
-    def __init__(self, in_channels=3, out_channels=1, hidden_dim=128, num_tube_queries=4):
+    def __init__(self, in_channels=3, out_channels=1, hidden_dim=256, num_tube_queries=8, pretrained_path=None):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.num_tube_queries = num_tube_queries
 
-        # 3D Feature Extractor
-        self.backbone3d = nn.Sequential(
-            nn.Conv3d(in_channels, 32, kernel_size=(3, 3, 3), padding=(1, 1, 1)),
-            nn.BatchNorm3d(32),
-            nn.GELU(),
-            nn.Conv3d(32, hidden_dim, kernel_size=(1, 4, 4), stride=(1, 4, 4)),
-            nn.BatchNorm3d(hidden_dim),
-            nn.GELU()
-        )
+        # Pretrained ResNet Backbone for frame-level feature extraction
+        import torchvision.models as models
+        res = models.resnet34(weights=None)
+        if pretrained_path and os.path.exists(pretrained_path):
+            state = torch.load(pretrained_path, map_location='cpu')
+            res.load_state_dict(state, strict=False)
+            print(f">> TubeFormer: Loaded pretrained ResNet-34 backbone from {pretrained_path}!")
+        elif os.path.exists('/home/medimg/.cache/torch/hub/checkpoints/resnet34-b627a593.pth'):
+            p = '/home/medimg/.cache/torch/hub/checkpoints/resnet34-b627a593.pth'
+            state = torch.load(p, map_location='cpu')
+            res.load_state_dict(state, strict=False)
+            print(f">> TubeFormer: Loaded pretrained ResNet-34 backbone from {p}!")
+        elif os.path.exists('/home/venkatesh/.cache/torch/hub/checkpoints/resnet34-b627a593.pth'):
+            p = '/home/venkatesh/.cache/torch/hub/checkpoints/resnet34-b627a593.pth'
+            state = torch.load(p, map_location='cpu')
+            res.load_state_dict(state, strict=False)
+            print(f">> TubeFormer: Loaded pretrained ResNet-34 backbone from {p}!")
+
+        self.stem = nn.Sequential(res.conv1, res.bn1, res.relu, res.maxpool)
+        self.layer1 = res.layer1 # 64 ch, 1/4
+        self.layer2 = res.layer2 # 128 ch, 1/8
+        self.layer3 = res.layer3 # 256 ch, 1/16
+        self.proj = nn.Conv2d(256, hidden_dim, kernel_size=1)
 
         # Spatio-Temporal Tube Queries: (num_tube_queries, hidden_dim)
         self.tube_queries = nn.Embedding(num_tube_queries, hidden_dim)
-        self.temporal_attn = nn.MultiheadAttention(embed_dim=hidden_dim, num_heads=4, batch_first=True)
+        self.temporal_attn = nn.MultiheadAttention(embed_dim=hidden_dim, num_heads=8, batch_first=True)
         self.norm = nn.LayerNorm(hidden_dim)
 
-        # 3D Tube Head to project back into volumetric segmentation mask
-        self.tube_head = nn.Sequential(
-            nn.ConvTranspose3d(hidden_dim, 64, kernel_size=(1, 2, 2), stride=(1, 2, 2)),
-            nn.BatchNorm3d(64),
+        # High-resolution multi-scale skip decoder
+        self.dec3 = nn.Sequential(
+            nn.ConvTranspose2d(hidden_dim, 128, kernel_size=2, stride=2), # 1/8
+            nn.BatchNorm2d(128),
+            nn.GELU()
+        )
+        self.dec2 = nn.Sequential(
+            nn.ConvTranspose2d(128 + 128, 64, kernel_size=2, stride=2), # 1/4
+            nn.BatchNorm2d(64),
+            nn.GELU()
+        )
+        self.dec1 = nn.Sequential(
+            nn.ConvTranspose2d(64 + 64, 32, kernel_size=2, stride=2), # 1/2
+            nn.BatchNorm2d(32),
             nn.GELU(),
-            nn.ConvTranspose3d(64, 32, kernel_size=(1, 2, 2), stride=(1, 2, 2)),
-            nn.BatchNorm3d(32),
+            nn.ConvTranspose2d(32, 16, kernel_size=2, stride=2), # 1
+            nn.BatchNorm2d(16),
             nn.GELU(),
-            nn.Conv3d(32, out_channels, kernel_size=3, padding=1)
+            nn.Conv2d(16, out_channels, kernel_size=1)
         )
 
     def forward(self, x):
         # x: (B, C, T, H, W)
         B, C, T, H, W = x.shape
-        feat3d = self.backbone3d(x) # (B, hidden_dim, T, H/4, W/4)
-        B_f, D_f, T_f, H_f, W_f = feat3d.shape
+        x_flat = x.permute(0, 2, 1, 3, 4).contiguous().view(B * T, C, H, W)
 
-        # Flatten spatio-temporal tokens: (B, T_f * H_f * W_f, D_f)
-        tokens = feat3d.permute(0, 2, 3, 4, 1).contiguous().view(B_f, T_f * H_f * W_f, D_f)
-        queries = self.tube_queries.weight.unsqueeze(0).expand(B_f, -1, -1) # (B, num_tube_queries, D_f)
+        # Backbone feature extraction
+        stem = self.stem(x_flat)
+        l1 = self.layer1(stem) # (BT, 64, H/4, W/4)
+        l2 = self.layer2(l1)   # (BT, 128, H/8, W/8)
+        l3 = self.layer3(l2)   # (BT, 256, H/16, W/16)
+        feat = self.proj(l3)   # (BT, hidden_dim, H/16, W/16)
+        _, D_f, H_f, W_f = feat.shape
+
+        # Space-Time Tube Attention across volume
+        tokens = feat.view(B, T, D_f, H_f, W_f).permute(0, 1, 3, 4, 2).contiguous().view(B, T * H_f * W_f, D_f)
+        queries = self.tube_queries.weight.unsqueeze(0).expand(B, -1, -1) # (B, num_tube_queries, D_f)
 
         # Tube cross-attention
         attn_out, _ = self.temporal_attn(tokens, queries, queries)
         tokens_refined = self.norm(tokens + attn_out)
 
-        # Reshape back to 3D volume and decode
-        vol_refined = tokens_refined.view(B_f, T_f, H_f, W_f, D_f).permute(0, 4, 1, 2, 3).contiguous()
-        out = self.tube_head(vol_refined)
-        out = F.interpolate(out, size=(T, H, W), mode='trilinear', align_corners=False)
+        # Reshape back to (B*T, D_f, H_f, W_f)
+        feat_refined = tokens_refined.view(B, T, H_f, W_f, D_f).permute(0, 1, 4, 2, 3).contiguous().view(B * T, D_f, H_f, W_f)
+
+        # High-resolution skip decoder
+        d3 = self.dec3(feat_refined) # (BT, 128, H/8, W/8)
+        d2 = self.dec2(torch.cat([d3, l2], dim=1)) # (BT, 64, H/4, W/4)
+        out_flat = self.dec1(torch.cat([d2, l1], dim=1)) # (BT, 1, H, W)
+
+        out = out_flat.view(B, T, 1, H, W).permute(0, 2, 1, 3, 4).contiguous()
         return out
 
 
