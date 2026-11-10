@@ -223,16 +223,12 @@ def main():
                     if not os.path.exists(mp):
                         mp = os.path.join(data_root, pdir, "masks", f"{fnum}.png")
 
-                    im = Image.open(ip).convert("RGB")
-                    mk = Image.open(mp).convert("L")
-                    im = np.array(im, dtype=np.float32)
-                    mk = (np.array(mk, dtype=np.float32) > 127).astype(np.float32)
-
-                    H_orig, W_orig = im.shape[:2]
-                    st_h = max(0, (H_orig - 448) // 2)
-                    st_w = max(0, (W_orig - 320) // 2)
-                    im = im[st_h : st_h + 448, st_w : st_w + 320]
-                    gt = mk[st_h : st_h + 448, st_w : st_w + 320]
+                    if os.path.exists(ip) and os.path.exists(mp):
+                        im = np.array(Image.open(ip).convert('RGB'))[4:452, 11:331, :]
+                        gt = (np.array(Image.open(mp))[4:452, 11:331] > 127).astype(np.uint8)
+                    else:
+                        im = np.zeros((448, 320, 3), dtype=np.uint8)
+                        gt = np.zeros((448, 320), dtype=np.uint8)
 
                     it = torch.from_numpy(im).permute(2, 0, 1).float().to(device) / 255.0
                     it = (it - mean) / std
@@ -302,16 +298,12 @@ def main():
                     if not os.path.exists(mp):
                         mp = os.path.join(data_root, pdir, "masks", f"{fnum}.png")
 
-                    im = Image.open(ip).convert("RGB")
-                    mk = Image.open(mp).convert("L")
-                    im = np.array(im, dtype=np.float32)
-                    mk = (np.array(mk, dtype=np.float32) > 127).astype(np.float32)
-
-                    H_orig, W_orig = im.shape[:2]
-                    st_h = max(0, (H_orig - 448) // 2)
-                    st_w = max(0, (W_orig - 320) // 2)
-                    im = im[st_h : st_h + 448, st_w : st_w + 320]
-                    gt = mk[st_h : st_h + 448, st_w : st_w + 320]
+                    if os.path.exists(ip) and os.path.exists(mp):
+                        im = np.array(Image.open(ip).convert('RGB'))[4:452, 11:331, :]
+                        gt = (np.array(Image.open(mp))[4:452, 11:331] > 127).astype(np.uint8)
+                    else:
+                        im = np.zeros((448, 320, 3), dtype=np.uint8)
+                        gt = np.zeros((448, 320), dtype=np.uint8)
 
                     it = torch.from_numpy(im).permute(2, 0, 1).float().to(device) / 255.0
                     it = (it - mean) / std
