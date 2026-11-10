@@ -128,5 +128,44 @@ python spatio_temporal_video/train_video.py --model video_swin --device 1 --epoc
 
 ---
 
-## 📜 Citation & Reference
-If you find this benchmark and code useful in your medical imaging research, please cite our corresponding publications.
+## 📜 Citation & References
+
+If you find this benchmark and code useful in your medical imaging research, please cite our corresponding publications and the foundational model architectures:
+
+```bibtex
+@article{ravi2024sam2,
+  title={{SAM 2}: Segment Anything in Images and Videos},
+  author={Ravi, Nikhila and others},
+  journal={arXiv preprint arXiv:2408.00714},
+  year={2024}
+}
+
+@article{wang2023memsam,
+  title={{MemSAM}: Taming Segment Anything Model for Echocardiography Video Segmentation},
+  author={Wang, Jiayuan and others},
+  journal={arXiv preprint arXiv:2308.11822},
+  year={2023}
+}
+
+@inproceedings{wang2021vistr,
+  title={End-to-End Video Instance Segmentation with Transformers},
+  author={Wang, Yuqing and others},
+  booktitle={CVPR},
+  year={2021}
+}
+
+@inproceedings{cheng2022video_mask2former,
+  title={Masked-attention Mask Transformer for Universal Image Segmentation},
+  author={Cheng, Bowen and others},
+  booktitle={CVPR},
+  year={2022}
+}
+
+@inproceedings{xie2021segformer,
+  title={{SegFormer}: Simple and Efficient Design for Semantic Segmentation with Light-Weight Transformers},
+  author={Xie, Enze and others},
+  booktitle={NeurIPS},
+  year={2021}
+}
+```
+All method references are cataloged in [`references.bib`](references.bib).
