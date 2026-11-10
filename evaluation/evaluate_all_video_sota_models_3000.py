@@ -180,87 +180,200 @@ def main():
 
     test_csv = os.path.join(data_root, "csv_files/full_data_csv/data_with_v_h_90_99.csv")
     patients_csv = os.path.join(data_root, "csv_files/full_data_csv/patients_list_1_99.csv")
-
-    test_ds = VideoAsterDataset(
-        data_path=data_root,
-        patients_csv=patients_csv,
-        frames_csv=test_csv,
-        num_frames=args.num_frames,
-        stride=args.num_frames,
-        is_training=False
-    )
-    test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, num_workers=2)
-    print(f">> Dataset loaded: {len(test_ds)} clips ({len(test_ds)*args.num_frames} frames across Patients 90-99).")
+    patients_df = pd.read_csv(patients_csv)
+    test_df = pd.read_csv(test_csv)
 
     model = load_model(args.model, ckpt_path, device)
 
+    # Normalization parameters matching standard benchmark
+    mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225], device=device).view(3, 1, 1)
+
+    unique_local_pids = sorted(test_df['patient_id'].unique())
+    print(f">> Found {len(unique_local_pids)} test patients: {unique_local_pids}. Evaluating all 300 frames per patient (3,000 frames total).")
+
     rows = []
-    frame_idx = 0
     t0 = time.time()
 
-    print(f">> Commencing evaluation on {device}...")
     with torch.no_grad():
-        for x_clip, mask_clip, targets in test_loader:
-            x_clip = x_clip.to(device)
-            mask_clip = mask_clip.to(device)
-            pids = targets["patient_id"].numpy()
+        for local_pid in unique_local_pids:
+            actual_pid = local_pid + 90 if local_pid < 10 else local_pid
+            pdir = str(patients_df.iloc[actual_pid]['path']).strip()
 
-            if args.model.startswith("vistr"):
-                # NestedTensor forward for VisTR
-                from models.VisTR.util.misc import NestedTensor
-                B, C, T, H, W = x_clip.shape
-                x_down = F.interpolate(x_clip, size=(T, 224, 160), mode='trilinear', align_corners=False)
-                x_flat = x_down.permute(0, 2, 1, 3, 4).reshape(B * T, C, 224, 160)
-                mask_t = torch.zeros((B * T, 224, 160), dtype=torch.bool, device=device)
-                nested = NestedTensor(x_flat, mask_t)
-                preds_masks = model(nested)
-                preds = F.interpolate(preds_masks, size=(H, W), mode='bilinear', align_corners=False).view(B, T, 1, H, W).permute(0, 2, 1, 3, 4)
-            else:
-                B, C, T, H, W = x_clip.shape
-                # Dense spatio-temporal video models accept (B, C, T, 224, 160)
-                x_down = F.interpolate(x_clip, size=(T, 224, 160), mode='trilinear', align_corners=False).to(device)
-                preds_down = model(x_down)
-                preds = F.interpolate(preds_down, size=(T, H, W), mode='trilinear', align_corners=False)
+            patient_rows = test_df[test_df['patient_id'] == local_pid]
+            available_frames = sorted(patient_rows['image_no'].unique())
+            if len(available_frames) == 0:
+                available_frames = list(range(300))
 
-            preds_sig = torch.sigmoid(preds)
-            preds_bin = (preds_sig > 0.5).float()
+            evaluated_frames = set()
 
-            B, _, T, H, W = preds.shape
-            for b in range(B):
-                pid = str(pids[b])
-                for t in range(T):
-                    p_flat = preds_bin[b, 0, t].view(-1)
-                    g_flat = mask_clip[b, 0, t].view(-1)
+            # 1. Non-overlapping 16-frame chunks (0..15, 16..31, ..., 272..287)
+            for start_idx in range(0, 288, args.num_frames):
+                clip_frame_nums = available_frames[start_idx : start_idx + args.num_frames]
+                if len(clip_frame_nums) < args.num_frames:
+                    break
 
-                    intersection = (p_flat * g_flat).sum().item()
-                    total = p_flat.sum().item() + g_flat.sum().item()
-                    dice = (2.0 * intersection / (total + 1e-6)) * 100.0
-                    iou = (intersection / (total - intersection + 1e-6)) * 100.0
+                frames_t = []
+                gts = []
+                valid_indices = []
 
-                    pred_csa = p_flat.sum().item() * CALIB_CSA_MM2
-                    gt_csa = g_flat.sum().item() * CALIB_CSA_MM2
-                    csa_err = abs(pred_csa - gt_csa)
+                for fnum in clip_frame_nums:
+                    ip = os.path.join(data_root, pdir, "images", f"{fnum}.jpg")
+                    mp = os.path.join(data_root, pdir, "masks", f"{fnum}.tif")
+                    if not os.path.exists(mp):
+                        mp = os.path.join(data_root, pdir, "masks", f"{fnum}.png")
 
-                    prec = (intersection / (p_flat.sum().item() + 1e-6)) * 100.0
-                    rec = (intersection / (g_flat.sum().item() + 1e-6)) * 100.0
+                    im = Image.open(ip).convert("RGB")
+                    mk = Image.open(mp).convert("L")
+                    im = np.array(im, dtype=np.float32)
+                    mk = (np.array(mk, dtype=np.float32) > 127).astype(np.float32)
 
-                    rows.append({
-                        "global_frame_idx": frame_idx,
-                        "patient_id": pid,
-                        "clip_frame": t,
-                        "dice": dice,
-                        "iou": iou,
-                        "precision": prec,
-                        "recall": rec,
-                        "pred_csa": pred_csa,
-                        "gt_csa": gt_csa,
-                        "csa_error": csa_err
-                    })
-                    frame_idx += 1
+                    H_orig, W_orig = im.shape[:2]
+                    st_h = max(0, (H_orig - 448) // 2)
+                    st_w = max(0, (W_orig - 320) // 2)
+                    im = im[st_h : st_h + 448, st_w : st_w + 320]
+                    gt = mk[st_h : st_h + 448, st_w : st_w + 320]
+
+                    it = torch.from_numpy(im).permute(2, 0, 1).float().to(device) / 255.0
+                    it = (it - mean) / std
+                    frames_t.append(it)
+                    gts.append(gt)
+                    valid_indices.append(fnum)
+
+                x_clip = torch.stack(frames_t, dim=1).unsqueeze(0) # (1, 3, T, 448, 320)
+
+                if args.model.startswith("vistr"):
+                    from models.VisTR.util.misc import NestedTensor
+                    B, C, T, H, W = x_clip.shape
+                    x_down = F.interpolate(x_clip, size=(T, 224, 160), mode='trilinear', align_corners=False)
+                    x_flat = x_down.permute(0, 2, 1, 3, 4).reshape(B * T, C, 224, 160)
+                    mask_t = torch.zeros((B * T, 224, 160), dtype=torch.bool, device=device)
+                    nested = NestedTensor(x_flat, mask_t)
+                    preds_masks = model(nested)
+                    preds_up = F.interpolate(preds_masks, size=(H, W), mode='bilinear', align_corners=False).view(B, T, 1, H, W).squeeze(0).squeeze(1)
+                else:
+                    B, C, T, H, W = x_clip.shape
+                    x_down = F.interpolate(x_clip, size=(T, 224, 160), mode='trilinear', align_corners=False)
+                    preds_down = model(x_down)
+                    preds_up = F.interpolate(preds_down, size=(T, H, W), mode='trilinear', align_corners=False).squeeze(0).squeeze(0)
+
+                prob = torch.sigmoid(preds_up)
+                pred_bin = (prob > 0.5).cpu().numpy().astype(np.uint8)
+
+                for t_idx, fnum in enumerate(valid_indices):
+                    if fnum not in evaluated_frames:
+                        p_flat = pred_bin[t_idx]
+                        g_flat = gts[t_idx]
+
+                        TP = np.count_nonzero((p_flat == 1) & (g_flat == 1))
+                        FP = np.count_nonzero((p_flat == 1) & (g_flat == 0))
+                        FN = np.count_nonzero((p_flat == 0) & (g_flat == 1))
+
+                        dice = (2.0 * TP / max(1, 2 * TP + FP + FN)) * 100.0
+                        iou = (TP / max(1, TP + FP + FN)) * 100.0
+                        prec = (TP / max(1, TP + FP)) * 100.0
+                        rec = (TP / max(1, TP + FN)) * 100.0
+
+                        pred_csa = float(np.sum(p_flat)) * CALIB_CSA_MM2
+                        gt_csa = float(np.sum(g_flat)) * CALIB_CSA_MM2
+                        csa_err = abs(pred_csa - gt_csa)
+
+                        rows.append({
+                            "patient_id": actual_pid,
+                            "image_no": fnum,
+                            "dice": dice,
+                            "iou": iou,
+                            "precision": prec,
+                            "recall": rec,
+                            "pred_csa": pred_csa,
+                            "gt_csa": gt_csa,
+                            "csa_error": csa_err
+                        })
+                        evaluated_frames.add(fnum)
+
+            # 2. Tail-anchored clip [284..299] (16 frames) to complete all 300 frames per patient
+            tail_indices = available_frames[300 - args.num_frames : 300]
+            if len(tail_indices) == args.num_frames:
+                frames_t = []
+                gts = []
+                for fnum in tail_indices:
+                    ip = os.path.join(data_root, pdir, "images", f"{fnum}.jpg")
+                    mp = os.path.join(data_root, pdir, "masks", f"{fnum}.tif")
+                    if not os.path.exists(mp):
+                        mp = os.path.join(data_root, pdir, "masks", f"{fnum}.png")
+
+                    im = Image.open(ip).convert("RGB")
+                    mk = Image.open(mp).convert("L")
+                    im = np.array(im, dtype=np.float32)
+                    mk = (np.array(mk, dtype=np.float32) > 127).astype(np.float32)
+
+                    H_orig, W_orig = im.shape[:2]
+                    st_h = max(0, (H_orig - 448) // 2)
+                    st_w = max(0, (W_orig - 320) // 2)
+                    im = im[st_h : st_h + 448, st_w : st_w + 320]
+                    gt = mk[st_h : st_h + 448, st_w : st_w + 320]
+
+                    it = torch.from_numpy(im).permute(2, 0, 1).float().to(device) / 255.0
+                    it = (it - mean) / std
+                    frames_t.append(it)
+                    gts.append(gt)
+
+                x_clip = torch.stack(frames_t, dim=1).unsqueeze(0)
+
+                if args.model.startswith("vistr"):
+                    from models.VisTR.util.misc import NestedTensor
+                    B, C, T, H, W = x_clip.shape
+                    x_down = F.interpolate(x_clip, size=(T, 224, 160), mode='trilinear', align_corners=False)
+                    x_flat = x_down.permute(0, 2, 1, 3, 4).reshape(B * T, C, 224, 160)
+                    mask_t = torch.zeros((B * T, 224, 160), dtype=torch.bool, device=device)
+                    nested = NestedTensor(x_flat, mask_t)
+                    preds_masks = model(nested)
+                    preds_up = F.interpolate(preds_masks, size=(H, W), mode='bilinear', align_corners=False).view(B, T, 1, H, W).squeeze(0).squeeze(1)
+                else:
+                    B, C, T, H, W = x_clip.shape
+                    x_down = F.interpolate(x_clip, size=(T, 224, 160), mode='trilinear', align_corners=False)
+                    preds_down = model(x_down)
+                    preds_up = F.interpolate(preds_down, size=(T, H, W), mode='trilinear', align_corners=False).squeeze(0).squeeze(0)
+
+                prob = torch.sigmoid(preds_up)
+                pred_bin = (prob > 0.5).cpu().numpy().astype(np.uint8)
+
+                for t_idx, fnum in enumerate(tail_indices):
+                    if fnum not in evaluated_frames:
+                        p_flat = pred_bin[t_idx]
+                        g_flat = gts[t_idx]
+
+                        TP = np.count_nonzero((p_flat == 1) & (g_flat == 1))
+                        FP = np.count_nonzero((p_flat == 1) & (g_flat == 0))
+                        FN = np.count_nonzero((p_flat == 0) & (g_flat == 1))
+
+                        dice = (2.0 * TP / max(1, 2 * TP + FP + FN)) * 100.0
+                        iou = (TP / max(1, TP + FP + FN)) * 100.0
+                        prec = (TP / max(1, TP + FP)) * 100.0
+                        rec = (TP / max(1, TP + FN)) * 100.0
+
+                        pred_csa = float(np.sum(p_flat)) * CALIB_CSA_MM2
+                        gt_csa = float(np.sum(g_flat)) * CALIB_CSA_MM2
+                        csa_err = abs(pred_csa - gt_csa)
+
+                        rows.append({
+                            "patient_id": actual_pid,
+                            "image_no": fnum,
+                            "dice": dice,
+                            "iou": iou,
+                            "precision": prec,
+                            "recall": rec,
+                            "pred_csa": pred_csa,
+                            "gt_csa": gt_csa,
+                            "csa_error": csa_err
+                        })
+                        evaluated_frames.add(fnum)
+
+            print(f">> Patient {actual_pid} (Local {local_pid}) finished: {len(evaluated_frames)} / 300 frames evaluated.")
 
     total_time = time.time() - t0
-    fps = frame_idx / total_time
     df = pd.DataFrame(rows)
+    fps = len(df) / total_time
 
     out_csv = args.output_csv or f"test_benchmark_{args.model}_all3000.csv"
     os.makedirs(os.path.dirname(out_csv) if os.path.dirname(out_csv) else ".", exist_ok=True)
@@ -269,7 +382,7 @@ def main():
     print("\n" + "=" * 80)
     print(f"BENCHMARK EVALUATION SUMMARY: {args.model.upper()}")
     print("=" * 80)
-    print(f"Total Frames Evaluated : {frame_idx} (Patients 90-99)")
+    print(f"Total Frames Evaluated : {len(df)} (Patients 90-99, 300 frames each)")
     print(f"Mean Test Dice Score   : {df['dice'].mean():.2f}% +/- {df['dice'].std():.2f}%")
     print(f"Mean Test IoU Score    : {df['iou'].mean():.2f}% +/- {df['iou'].std():.2f}%")
     print(f"Mean Precision         : {df['precision'].mean():.2f}%")
@@ -277,12 +390,13 @@ def main():
     print(f"Mean Clinical CSA Error: {df['csa_error'].mean():.3f} +/- {df['csa_error'].std():.3f} mm2")
     print(f"Inference Throughput   : {fps:.1f} FPS")
 
-    # Distal Carpal Tunnel Wrist Segment (first 40 frames of each patient)
-    wrist_df = df[df['clip_frame'] < 40]
+    # Distal Carpal Tunnel Wrist Segment (first 40 frames of each patient: image_no < 40)
+    wrist_df = df[df['image_no'] < 40]
     print("-" * 80)
     print(f"Distal Wrist Mean Dice : {wrist_df['dice'].mean():.2f}% +/- {wrist_df['dice'].std():.2f}%")
     print(f"Distal Wrist CSA Error : {wrist_df['csa_error'].mean():.3f} +/- {wrist_df['csa_error'].std():.3f} mm2")
     print(f"Results CSV saved to   : {out_csv}")
+    print("=" * 80 + "\n")
     print("=" * 80 + "\n")
 
 if __name__ == "__main__":
