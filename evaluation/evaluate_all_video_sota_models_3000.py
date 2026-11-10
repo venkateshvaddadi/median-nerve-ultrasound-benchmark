@@ -1,25 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Unified Spatio-Temporal Video SOTA Benchmark Evaluation Script
-Evaluates all benchmarked spatio-temporal video architectures on the held-out test cohort
-(Patients 90-99, all 3,000 independent continuous ultrasound frames).
+Unified Official 3,000-Frame Benchmark Evaluator for All Spatio-Temporal Video Models.
+Exact identical script used to evaluate VisTR, TubeDETR, SAM2/MemSAM, Video-Mask2Former, and VideoSwin.
 
-Supports:
-  1. 'tubedetr': Original TubeDETR (ResNet-101 + Spatio-Temporal DETR Transformer)
-  2. 'memsam' / 'sam2': SAM 2 / MemSAM (Streaming Video Memory ViT)
-  3. 'tubeformer': Modified TubeFormer (ResNet-34 + 3D Tube Attention Queries)
-  4. 'vistr_resnet101': Modified VisTR (ResNet-101)
-  5. 'vistr_resnet50': Modified VisTR (ResNet-50)
-  6. 'video_mask2former': Video-Mask2Former (3D Mask Query Transformer)
-  7. 'video_swin': VideoSwinUNet (3D Swin Transformer)
-  8. 'timesformer': TimeSformer (Divided Space-Time Attention ViT)
-  9. 'video_mamba': Spatio-Temporal Video-Mamba (MambaOut / Vivim SSM)
-
-Computes:
-  - Full-sweep Dice, IoU, Precision, Recall
-  - Clinical Cross-Sectional Area (CSA in mm²) and absolute CSA error (|pred - gt|)
-  - Distal Carpal Tunnel Wrist segment metrics (first 40 frames of each patient)
+Evaluates across all 10 independent test patients (Patients 90-99), 300 continuous frames each.
+Handles non-overlapping 16-frame clips + tail-anchored boundary slices [284..299].
 """
 
 import os
@@ -32,9 +18,8 @@ from PIL import Image
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
 
-# Add parent and local directories for imports
+# Add path for models
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../spatio_temporal_video")))
 sys.path.append("/media/medimg/Data/venkatesh_data/Aster/experiement_10_ResUnet")
@@ -42,162 +27,125 @@ sys.path.append("/media/medimg/Data/venkatesh_data/Aster/experiement_10_ResUnet/
 
 try:
     from video_sota_models import (
-        TubeFormer, SAM2MemSAM, VideoMask2Former,
-        VideoSwinUNet, TimeSformerUNet, VideoMambaUNet, get_modified_vistr
+        VideoSwinUNet, get_modified_vistr, VideoMask2Former, SAM2MemSAM,
+        TubeFormer, STCNXMemUNet, TimeSformerUNet, VideoMambaUNet
     )
 except ImportError:
     from sota_models.video_sota_models import (
-        TubeFormer, SAM2MemSAM, VideoMask2Former,
-        VideoSwinUNet, TimeSformerUNet, VideoMambaUNet, get_modified_vistr
+        VideoSwinUNet, get_modified_vistr, VideoMask2Former, SAM2MemSAM,
+        TubeFormer, STCNXMemUNet, TimeSformerUNet, VideoMambaUNet
     )
 
 try:
-    from spatio_temporal_video.video_dataset import VideoAsterDataset
+    from video_sota_models import OriginalTubeDETR
 except ImportError:
     try:
-        from video_dataset import VideoAsterDataset
+        from sota_models.video_sota_models import OriginalTubeDETR
     except ImportError:
-        from sota_models.video_dataset import VideoAsterDataset
+        OriginalTubeDETR = None
 
-CALIB_CSA_MM2 = 0.004328254 # Physical calibration factor (mm² per pixel)
+try:
+    from models.VisTR.util.misc import NestedTensor
+except ImportError:
+    NestedTensor = None
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Unified Video SOTA 3000-Frame Evaluation")
-    parser.add_argument("--model", type=str, required=True,
-                        choices=["tubedetr", "memsam", "sam2", "tubeformer",
-                                 "vistr_resnet101", "vistr_resnet50", "video_mask2former",
-                                 "video_swin", "timesformer", "video_mamba"],
-                        help="Model architecture name to evaluate")
-    parser.add_argument("--checkpoint", type=str, default=None,
-                        help="Path to trained model checkpoint (.pth). If None, searches standard paths.")
-    parser.add_argument("--data_root", type=str, default=None,
-                        help="Path to Aster ultrasound dataset directory.")
-    parser.add_argument("--device", type=int, default=0, help="CUDA device index")
-    parser.add_argument("--batch_size", type=int, default=4, help="Batch size of 16-frame clips")
-    parser.add_argument("--num_frames", type=int, default=16, help="Frames per clip (default: 16)")
-    parser.add_argument("--output_csv", type=str, default=None,
-                        help="Destination CSV to save per-frame predictions and clinical metrics.")
-    return parser.parse_args()
+CALIB_CSA_MM2 = 0.004328254
 
-def locate_data_root(user_path=None):
-    if user_path and os.path.exists(user_path):
-        return user_path
-    candidates = [
-        "/media/medimg/Data/venkatesh_data/Aster/data_making/aster_updated_data_nov_09_2022_with_flip/",
-        "/media/venkatesh/DATA/venkatesh/IISc/MIG_LAB_WORK/Experiments/Aster_hosptial_median_nerve/CTS/data_making/aster_updated_data_nov_09_2022_with_flip/",
-        "../data_making/aster_updated_data_nov_09_2022_with_flip/"
-    ]
-    for c in candidates:
-        if os.path.exists(c):
-            return c
-    raise FileNotFoundError(f"Could not locate Aster dataset root. Please specify --data_root.")
+def compute_detailed_metrics(pred_bin, target_bin):
+    TP = np.count_nonzero((pred_bin == 1) & (target_bin == 1))
+    FP = np.count_nonzero((pred_bin == 1) & (target_bin == 0))
+    FN = np.count_nonzero((pred_bin == 0) & (target_bin == 1))
+    TN = np.count_nonzero((pred_bin == 0) & (target_bin == 0))
 
-def locate_checkpoint(model_name, user_ckpt=None):
-    if user_ckpt and os.path.exists(user_ckpt):
-        return user_ckpt
-    
-    ckpt_map = {
-        "tubedetr": [
-            "/home/medimg/video_benchmark_results/tubedetr_benchmark/best_tubedetr.pth",
-            "video_benchmark_results/tubedetr_benchmark/best_tubedetr.pth"
-        ],
-        "memsam": [
-            "/home/medimg/video_benchmark_results/sam2_benchmark/best_sam2.pth",
-            "video_benchmark_results/sam2_benchmark/best_sam2.pth"
-        ],
-        "sam2": [
-            "/home/medimg/video_benchmark_results/sam2_benchmark/best_sam2.pth",
-            "video_benchmark_results/sam2_benchmark/best_sam2.pth"
-        ],
-        "tubeformer": [
-            "/home/medimg/video_benchmark_results/tubeformer_benchmark/best_tubeformer.pth",
-            "video_benchmark_results/tubeformer_benchmark/best_tubeformer.pth"
-        ],
-        "vistr_resnet101": [
-            "/home/medimg/video_benchmark_results/vistr_resnet101_benchmark/best_vistr_resnet101.pth",
-            "video_benchmark_results/vistr_resnet101_benchmark/best_vistr_resnet101.pth"
-        ],
-        "vistr_resnet50": [
-            "/home/medimg/video_benchmark_results/vistr_resnet50_benchmark/best_vistr_resnet50.pth",
-            "video_benchmark_results/vistr_resnet50_benchmark/best_vistr_resnet50.pth"
-        ],
-        "video_mask2former": [
-            "/home/medimg/video_benchmark_results/video_mask2former_benchmark/best_video_mask2former.pth",
-            "video_benchmark_results/video_mask2former_benchmark/best_video_mask2former.pth"
-        ],
-        "video_swin": [
-            "/home/medimg/video_benchmark_results/video_swin_benchmark/best_video_swin.pth",
-            "video_benchmark_results/video_swin_benchmark/best_video_swin.pth"
-        ],
-        "timesformer": [
-            "/home/medimg/video_benchmark_results/timesformer_benchmark/best_timesformer.pth",
-            "video_benchmark_results/timesformer_benchmark/best_timesformer.pth"
-        ],
-        "video_mamba": [
-            "/home/medimg/video_benchmark_results/video_mamba_benchmark/best_video_mamba.pth",
-            "video_benchmark_results/video_mamba_benchmark/best_video_mamba.pth"
-        ]
+    prec = TP / max(1, (TP + FP))
+    rec = TP / max(1, (TP + FN))
+    iou = TP / max(1, (TP + FP + FN))
+    dice = (2.0 * TP) / max(1, (2 * TP + FP + FN))
+
+    csa_pred = float(np.sum(pred_bin)) * CALIB_CSA_MM2
+    csa_gt = float(np.sum(target_bin)) * CALIB_CSA_MM2
+    csa_err = abs(csa_pred - csa_gt)
+
+    return {
+        "dice": dice,
+        "iou": iou,
+        "precision": prec,
+        "recall": rec,
+        "csa_pred": csa_pred,
+        "csa_gt": csa_gt,
+        "csa_err": csa_err
     }
-    
-    for path in ckpt_map.get(model_name, []):
-        if os.path.exists(path):
-            return path
-    raise FileNotFoundError(f"Checkpoint for {model_name} not found. Please specify --checkpoint <path>.")
 
-def load_model(model_name, ckpt_path, device):
-    print(f">> Initializing architecture: {model_name}...")
-    if model_name in ["tubedetr", "tubeformer"]:
-        model = TubeFormer(in_channels=3, out_channels=1)
-    elif model_name == "vistr_resnet101":
-        model = get_modified_vistr(backbone="resnet101", num_frames=16)
-    elif model_name == "vistr_resnet50":
-        model = get_modified_vistr(backbone="resnet50", num_frames=16)
-    elif model_name == "video_mask2former":
-        model = VideoMask2Former(in_channels=3, out_channels=1)
-    elif model_name == "video_swin":
-        model = VideoSwinUNet(in_channels=3, out_channels=1, feature_size=48)
-    elif model_name == "timesformer":
-        model = TimeSformerUNet(in_channels=3, out_channels=1, pretrained=False)
-    elif model_name == "video_mamba":
-        model = VideoMambaUNet(in_channels=3, out_channels=1, pretrained=False)
-    else:
-        raise ValueError(f"Unknown model name: {model_name}")
+def evaluate_model(model_type, ckpt_path, device_id=0, data_root=None, output_csv=None):
+    device = torch.device(f"cuda:{device_id}" if torch.cuda.is_available() else "cpu")
+    print(f"\n========================================================")
+    print(f">> Starting Full 3,000-Frame Benchmark for: {model_type.upper()}")
+    print(f">> Checkpoint: {ckpt_path}")
+    print(f">> Device:     {device}")
+    print(f"========================================================")
 
-    print(f">> Loading state_dict from: {ckpt_path}")
-    state = torch.load(ckpt_path, map_location=device, weights_only=False)
-    model.load_state_dict(state)
-    model.to(device)
-    model.eval()
-    params = sum(p.numel() for p in model.parameters())
-    print(f">> Model successfully loaded ({params / 1e6:.2f} M parameters)!")
-    return model
+    if data_root is None:
+        candidates = [
+            "/media/medimg/Data/venkatesh_data/Aster/data_making/aster_updated_data_nov_09_2022_with_flip/",
+            "/media/venkatesh/DATA/venkatesh/IISc/MIG_LAB_WORK/Experiments/Aster_hosptial_median_nerve/CTS/data_making/aster_updated_data_nov_09_2022_with_flip/",
+            "../data_making/aster_updated_data_nov_09_2022_with_flip/"
+        ]
+        for c in candidates:
+            if os.path.exists(c):
+                data_root = c
+                break
 
-def main():
-    args = parse_args()
-    device = torch.device(f"cuda:{args.device}" if torch.cuda.is_available() else "cpu")
-    data_root = locate_data_root(args.data_root)
-    ckpt_path = locate_checkpoint(args.model, args.checkpoint)
-
-    test_csv = os.path.join(data_root, "csv_files/full_data_csv/data_with_v_h_90_99.csv")
     patients_csv = os.path.join(data_root, "csv_files/full_data_csv/patients_list_1_99.csv")
+    test_csv = os.path.join(data_root, "csv_files/full_data_csv/data_with_v_h_90_99.csv")
     patients_df = pd.read_csv(patients_csv)
     test_df = pd.read_csv(test_csv)
 
-    model = load_model(args.model, ckpt_path, device)
+    # Initialize model
+    if model_type == "video_swin":
+        model = VideoSwinUNet(in_channels=3, out_channels=1, feature_size=48).to(device)
+    elif model_type == "video_mask2former":
+        model = VideoMask2Former(in_channels=3, out_channels=1).to(device)
+    elif model_type in ["sam2", "memsam"]:
+        model = SAM2MemSAM(in_channels=3, out_channels=1).to(device)
+    elif model_type == "tubeformer":
+        model = TubeFormer(in_channels=3, out_channels=1).to(device)
+    elif model_type in ["tubedetr", "original_tubedetr"]:
+        if OriginalTubeDETR is not None:
+            model = OriginalTubeDETR(in_channels=3, out_channels=1, hidden_dim=256, num_tube_queries=16).to(device)
+        else:
+            model = TubeFormer(in_channels=3, out_channels=1).to(device)
+    elif model_type == "stcn":
+        model = STCNXMemUNet(in_channels=3, out_channels=1).to(device)
+    elif model_type == "timesformer":
+        model = TimeSformerUNet(in_channels=3, out_channels=1, pretrained=False).to(device)
+    elif model_type == "video_mamba":
+        model = VideoMambaUNet(in_channels=3, out_channels=1, pretrained=False).to(device)
+    elif model_type == "vistr_resnet50":
+        model = get_modified_vistr(num_frames=16, backbone="resnet50", device=str(device)).to(device)
+    elif model_type == "vistr_resnet101":
+        model = get_modified_vistr(num_frames=16, backbone="resnet101", device=str(device)).to(device)
+    elif model_type == "vistr_resnet18":
+        model = get_modified_vistr(num_frames=16, backbone="resnet18", device=str(device)).to(device)
+    else:
+        raise ValueError(f"Unknown model_type: {model_type}")
 
-    # Normalization parameters matching standard benchmark
-    mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(3, 1, 1)
-    std = torch.tensor([0.229, 0.224, 0.225], device=device).view(3, 1, 1)
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    model.load_state_dict(ckpt)
+    model.eval()
 
+    # Exact training normalization
+    mean = torch.tensor((0.2316, 0.2316, 0.2316)).view(3, 1, 1).to(device)
+    std = torch.tensor((0.2038, 0.2038, 0.2038)).view(3, 1, 1).to(device)
+
+    all_metrics = []
     unique_local_pids = sorted(test_df['patient_id'].unique())
-    print(f">> Found {len(unique_local_pids)} test patients: {unique_local_pids}. Evaluating all 300 frames per patient (3,000 frames total).")
-
-    rows = []
     t0 = time.time()
 
     with torch.no_grad():
         for local_pid in unique_local_pids:
             actual_pid = local_pid + 90 if local_pid < 10 else local_pid
+            if actual_pid >= len(patients_df):
+                continue
             pdir = str(patients_df.iloc[actual_pid]['path']).strip()
 
             patient_rows = test_df[test_df['patient_id'] == local_pid]
@@ -207,16 +155,13 @@ def main():
 
             evaluated_frames = set()
 
-            # 1. Non-overlapping 16-frame chunks (0..15, 16..31, ..., 272..287)
-            for start_idx in range(0, 288, args.num_frames):
-                clip_frame_nums = available_frames[start_idx : start_idx + args.num_frames]
-                if len(clip_frame_nums) < args.num_frames:
+            # 1. Non-overlapping 16-frame chunks
+            for start_idx in range(0, 288, 16):
+                clip_frame_nums = available_frames[start_idx : start_idx + 16]
+                if len(clip_frame_nums) < 16:
                     break
 
-                frames_t = []
-                gts = []
-                valid_indices = []
-
+                frames_t, gts, valid_indices = [], [], []
                 for fnum in clip_frame_nums:
                     ip = os.path.join(data_root, pdir, "images", f"{fnum}.jpg")
                     mp = os.path.join(data_root, pdir, "masks", f"{fnum}.tif")
@@ -236,62 +181,38 @@ def main():
                     gts.append(gt)
                     valid_indices.append(fnum)
 
-                x_clip = torch.stack(frames_t, dim=1).unsqueeze(0) # (1, 3, T, 448, 320)
+                x_clip = torch.stack(frames_t, dim=1).unsqueeze(0) # (1, 3, 16, 448, 320)
 
-                if args.model.startswith("vistr"):
-                    from models.VisTR.util.misc import NestedTensor
-                    B, C, T, H, W = x_clip.shape
-                    x_down = F.interpolate(x_clip, size=(T, 224, 160), mode='trilinear', align_corners=False)
-                    x_flat = x_down.permute(0, 2, 1, 3, 4).reshape(B * T, C, 224, 160)
-                    mask_t = torch.zeros((B * T, 224, 160), dtype=torch.bool, device=device)
-                    nested = NestedTensor(x_flat, mask_t)
-                    preds_masks = model(nested)
-                    preds_up = F.interpolate(preds_masks, size=(H, W), mode='bilinear', align_corners=False).view(B, T, 1, H, W).squeeze(0).squeeze(1)
-                else:
-                    B, C, T, H, W = x_clip.shape
-                    x_down = F.interpolate(x_clip, size=(T, 224, 160), mode='trilinear', align_corners=False)
-                    preds_down = model(x_down)
-                    preds_up = F.interpolate(preds_down, size=(T, H, W), mode='trilinear', align_corners=False).squeeze(0).squeeze(0)
-
-                prob = torch.sigmoid(preds_up)
-                pred_bin = (prob > 0.5).cpu().numpy().astype(np.uint8)
+                with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                    if model_type in ["video_swin", "video_mask2former", "sam2", "memsam", "tubeformer", "tubedetr", "original_tubedetr", "stcn", "timesformer", "video_mamba"]:
+                        x_down = F.interpolate(x_clip, size=(16, 224, 160), mode='trilinear', align_corners=False)
+                        pred = model(x_down)
+                        pred_up = F.interpolate(pred, size=(16, 448, 320), mode='trilinear', align_corners=False)
+                        prob = torch.sigmoid(torch.clamp(pred_up, min=-30.0, max=30.0)).squeeze(0).squeeze(0)
+                        pred_bin = (prob > 0.5).cpu().numpy().astype(np.uint8)
+                    else:
+                        # Modified VisTR
+                        x_down = F.interpolate(x_clip, size=(16, 224, 160), mode='trilinear', align_corners=False)
+                        x_flat = x_down.permute(0, 2, 1, 3, 4).contiguous().view(16, 3, 224, 160)
+                        flat_mask = torch.zeros((16, 224, 160), dtype=torch.bool, device=device)
+                        samples = NestedTensor(x_flat, flat_mask)
+                        out = model(samples)
+                        pred_masks = torch.sigmoid(torch.clamp(out["pred_masks"].float(), min=-30.0, max=30.0))
+                        pred_masks_up = F.interpolate(pred_masks, size=(448, 320), mode='bilinear', align_corners=False)
+                        pred_bin = (pred_masks_up > 0.5).squeeze(0).cpu().numpy().astype(np.uint8)
 
                 for t_idx, fnum in enumerate(valid_indices):
                     if fnum not in evaluated_frames:
-                        p_flat = pred_bin[t_idx]
-                        g_flat = gts[t_idx]
-
-                        TP = np.count_nonzero((p_flat == 1) & (g_flat == 1))
-                        FP = np.count_nonzero((p_flat == 1) & (g_flat == 0))
-                        FN = np.count_nonzero((p_flat == 0) & (g_flat == 1))
-
-                        dice = (2.0 * TP / max(1, 2 * TP + FP + FN)) * 100.0
-                        iou = (TP / max(1, TP + FP + FN)) * 100.0
-                        prec = (TP / max(1, TP + FP)) * 100.0
-                        rec = (TP / max(1, TP + FN)) * 100.0
-
-                        pred_csa = float(np.sum(p_flat)) * CALIB_CSA_MM2
-                        gt_csa = float(np.sum(g_flat)) * CALIB_CSA_MM2
-                        csa_err = abs(pred_csa - gt_csa)
-
-                        rows.append({
-                            "patient_id": actual_pid,
-                            "image_no": fnum,
-                            "dice": dice,
-                            "iou": iou,
-                            "precision": prec,
-                            "recall": rec,
-                            "pred_csa": pred_csa,
-                            "gt_csa": gt_csa,
-                            "csa_error": csa_err
-                        })
+                        m = compute_detailed_metrics(pred_bin[t_idx], gts[t_idx])
+                        m["patient_id"] = actual_pid
+                        m["image_no"] = fnum
+                        all_metrics.append(m)
                         evaluated_frames.add(fnum)
 
-            # 2. Tail-anchored clip [284..299] (16 frames) to complete all 300 frames per patient
-            tail_indices = available_frames[300 - args.num_frames : 300]
-            if len(tail_indices) == args.num_frames:
-                frames_t = []
-                gts = []
+            # 2. Tail-anchored clip [284..299]
+            tail_indices = available_frames[284:300]
+            if len(tail_indices) == 16:
+                frames_t, gts = [], []
                 for fnum in tail_indices:
                     ip = os.path.join(data_root, pdir, "images", f"{fnum}.jpg")
                     mp = os.path.join(data_root, pdir, "masks", f"{fnum}.tif")
@@ -311,85 +232,87 @@ def main():
                     gts.append(gt)
 
                 x_clip = torch.stack(frames_t, dim=1).unsqueeze(0)
-
-                if args.model.startswith("vistr"):
-                    from models.VisTR.util.misc import NestedTensor
-                    B, C, T, H, W = x_clip.shape
-                    x_down = F.interpolate(x_clip, size=(T, 224, 160), mode='trilinear', align_corners=False)
-                    x_flat = x_down.permute(0, 2, 1, 3, 4).reshape(B * T, C, 224, 160)
-                    mask_t = torch.zeros((B * T, 224, 160), dtype=torch.bool, device=device)
-                    nested = NestedTensor(x_flat, mask_t)
-                    preds_masks = model(nested)
-                    preds_up = F.interpolate(preds_masks, size=(H, W), mode='bilinear', align_corners=False).view(B, T, 1, H, W).squeeze(0).squeeze(1)
-                else:
-                    B, C, T, H, W = x_clip.shape
-                    x_down = F.interpolate(x_clip, size=(T, 224, 160), mode='trilinear', align_corners=False)
-                    preds_down = model(x_down)
-                    preds_up = F.interpolate(preds_down, size=(T, H, W), mode='trilinear', align_corners=False).squeeze(0).squeeze(0)
-
-                prob = torch.sigmoid(preds_up)
-                pred_bin = (prob > 0.5).cpu().numpy().astype(np.uint8)
+                with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                    if model_type in ["video_swin", "video_mask2former", "sam2", "memsam", "tubeformer", "tubedetr", "original_tubedetr", "stcn", "timesformer", "video_mamba"]:
+                        x_down = F.interpolate(x_clip, size=(16, 224, 160), mode='trilinear', align_corners=False)
+                        pred = model(x_down)
+                        pred_up = F.interpolate(pred, size=(16, 448, 320), mode='trilinear', align_corners=False)
+                        prob = torch.sigmoid(torch.clamp(pred_up, min=-30.0, max=30.0)).squeeze(0).squeeze(0)
+                        pred_bin = (prob > 0.5).cpu().numpy().astype(np.uint8)
+                    else:
+                        x_down = F.interpolate(x_clip, size=(16, 224, 160), mode='trilinear', align_corners=False)
+                        x_flat = x_down.permute(0, 2, 1, 3, 4).contiguous().view(16, 3, 224, 160)
+                        flat_mask = torch.zeros((16, 224, 160), dtype=torch.bool, device=device)
+                        samples = NestedTensor(x_flat, flat_mask)
+                        out = model(samples)
+                        pred_masks = torch.sigmoid(torch.clamp(out["pred_masks"].float(), min=-30.0, max=30.0))
+                        pred_masks_up = F.interpolate(pred_masks, size=(448, 320), mode='bilinear', align_corners=False)
+                        pred_bin = (pred_masks_up > 0.5).squeeze(0).cpu().numpy().astype(np.uint8)
 
                 for t_idx, fnum in enumerate(tail_indices):
                     if fnum not in evaluated_frames:
-                        p_flat = pred_bin[t_idx]
-                        g_flat = gts[t_idx]
-
-                        TP = np.count_nonzero((p_flat == 1) & (g_flat == 1))
-                        FP = np.count_nonzero((p_flat == 1) & (g_flat == 0))
-                        FN = np.count_nonzero((p_flat == 0) & (g_flat == 1))
-
-                        dice = (2.0 * TP / max(1, 2 * TP + FP + FN)) * 100.0
-                        iou = (TP / max(1, TP + FP + FN)) * 100.0
-                        prec = (TP / max(1, TP + FP)) * 100.0
-                        rec = (TP / max(1, TP + FN)) * 100.0
-
-                        pred_csa = float(np.sum(p_flat)) * CALIB_CSA_MM2
-                        gt_csa = float(np.sum(g_flat)) * CALIB_CSA_MM2
-                        csa_err = abs(pred_csa - gt_csa)
-
-                        rows.append({
-                            "patient_id": actual_pid,
-                            "image_no": fnum,
-                            "dice": dice,
-                            "iou": iou,
-                            "precision": prec,
-                            "recall": rec,
-                            "pred_csa": pred_csa,
-                            "gt_csa": gt_csa,
-                            "csa_error": csa_err
-                        })
+                        m = compute_detailed_metrics(pred_bin[t_idx], gts[t_idx])
+                        m["patient_id"] = actual_pid
+                        m["image_no"] = fnum
+                        all_metrics.append(m)
                         evaluated_frames.add(fnum)
 
-            print(f">> Patient {actual_pid} (Local {local_pid}) finished: {len(evaluated_frames)} / 300 frames evaluated.")
+            print(f">> Patient {actual_pid} (Local {local_pid}) evaluated: {len(evaluated_frames)} / 300 frames.")
 
-    total_time = time.time() - t0
-    df = pd.DataFrame(rows)
-    fps = len(df) / total_time
-
-    out_csv = args.output_csv or f"test_benchmark_{args.model}_all3000.csv"
-    os.makedirs(os.path.dirname(out_csv) if os.path.dirname(out_csv) else ".", exist_ok=True)
-    df.to_csv(out_csv, index=False)
+    elapsed = time.time() - t0
+    df_out = pd.DataFrame(all_metrics)
+    csv_out = output_csv or f"/home/medimg/video_benchmark_results/test_benchmark_{model_type}_all3000.csv"
+    os.makedirs(os.path.dirname(csv_out), exist_ok=True)
+    df_out.to_csv(csv_out, index=False)
 
     print("\n" + "=" * 80)
-    print(f"BENCHMARK EVALUATION SUMMARY: {args.model.upper()}")
+    print(f"FINAL 3,000-FRAME TEST RESULTS FOR: {model_type.upper()}")
     print("=" * 80)
-    print(f"Total Frames Evaluated : {len(df)} (Patients 90-99, 300 frames each)")
-    print(f"Mean Test Dice Score   : {df['dice'].mean():.2f}% +/- {df['dice'].std():.2f}%")
-    print(f"Mean Test IoU Score    : {df['iou'].mean():.2f}% +/- {df['iou'].std():.2f}%")
-    print(f"Mean Precision         : {df['precision'].mean():.2f}%")
-    print(f"Mean Recall            : {df['recall'].mean():.2f}%")
-    print(f"Mean Clinical CSA Error: {df['csa_error'].mean():.3f} +/- {df['csa_error'].std():.3f} mm2")
-    print(f"Inference Throughput   : {fps:.1f} FPS")
+    print(f"Total Evaluated Frames: {len(df_out)} / 3000")
+    print(f"Test Dice:      {df_out['dice'].mean()*100:.2f}% ± {df_out['dice'].std()*100:.2f}%")
+    print(f"Test IoU:       {df_out['iou'].mean()*100:.2f}% ± {df_out['iou'].std()*100:.2f}%")
+    print(f"Test Precision: {df_out['precision'].mean()*100:.2f}% ± {df_out['precision'].std()*100:.2f}%")
+    print(f"Test Recall:    {df_out['recall'].mean()*100:.2f}% ± {df_out['recall'].std()*100:.2f}%")
+    print(f"Test CSA Error: {df_out['csa_err'].mean():.3f} mm² ± {df_out['csa_err'].std():.3f} mm²")
+    print(f"Throughput:     {len(df_out)/elapsed:.1f} FPS")
 
-    # Distal Carpal Tunnel Wrist Segment (first 40 frames of each patient: image_no < 40)
-    wrist_df = df[df['image_no'] < 40]
+    # Distal Carpal Tunnel Wrist Segment (image_no < 40)
+    wrist_df = df_out[df_out["image_no"] < 40]
     print("-" * 80)
-    print(f"Distal Wrist Mean Dice : {wrist_df['dice'].mean():.2f}% +/- {wrist_df['dice'].std():.2f}%")
-    print(f"Distal Wrist CSA Error : {wrist_df['csa_error'].mean():.3f} +/- {wrist_df['csa_error'].std():.3f} mm2")
-    print(f"Results CSV saved to   : {out_csv}")
+    print(f"Distal Wrist Mean Dice: {wrist_df['dice'].mean()*100:.2f}% ± {wrist_df['dice'].std()*100:.2f}%")
+    print(f"Distal Wrist CSA Error: {wrist_df['csa_err'].mean():.3f} ± {wrist_df['csa_err'].std():.3f} mm²")
+    print(f"Saved CSV report to: {csv_out}")
     print("=" * 80 + "\n")
-    print("=" * 80 + "\n")
+    return df_out
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Unified 3000-Frame Evaluation for Video SOTA Models")
+    parser.add_argument("--model", type=str, required=True,
+                        choices=["video_swin", "video_mask2former", "sam2", "memsam", "tubeformer",
+                                 "tubedetr", "original_tubedetr", "stcn", "timesformer", "video_mamba",
+                                 "vistr_resnet50", "vistr_resnet101", "vistr_resnet18"])
+    parser.add_argument("--ckpt", type=str, default=None)
+    parser.add_argument("--device", type=int, default=0)
+    parser.add_argument("--data_root", type=str, default=None)
+    parser.add_argument("--output_csv", type=str, default=None)
+    args = parser.parse_args()
+
+    # Default checkpoint locations
+    if args.ckpt is None:
+        ckpt_map = {
+            "vistr_resnet101": "/home/medimg/video_benchmark_results/vistr_resnet101_benchmark/best_vistr_resnet101.pth",
+            "vistr_resnet50": "/home/medimg/video_benchmark_results/vistr_resnet50_benchmark/best_vistr_resnet50.pth",
+            "vistr_resnet18": "/home/medimg/video_benchmark_results/vistr_resnet18_benchmark/best_vistr_resnet18.pth",
+            "video_mask2former": "/home/medimg/video_benchmark_results/video_mask2former_benchmark/best_video_mask2former.pth",
+            "sam2": "/home/medimg/video_benchmark_results/sam2_benchmark/best_sam2.pth",
+            "memsam": "/home/medimg/video_benchmark_results/sam2_benchmark/best_sam2.pth",
+            "tubeformer": "/home/medimg/video_benchmark_results/tubeformer_benchmark/best_tubeformer.pth",
+            "tubedetr": "/home/medimg/video_benchmark_results/tubedetr_benchmark/best_tubedetr.pth",
+            "original_tubedetr": "/home/medimg/video_benchmark_results/tubedetr_benchmark/best_tubedetr.pth",
+            "video_swin": "/home/medimg/video_benchmark_results/video_swin_benchmark/best_video_swin.pth",
+            "video_mamba": "/home/medimg/video_benchmark_results/video_mamba_benchmark/best_video_mamba.pth",
+            "timesformer": "/home/medimg/video_benchmark_results/timesformer_benchmark/best_timesformer.pth"
+        }
+        args.ckpt = ckpt_map[args.model]
+
+    evaluate_model(args.model, args.ckpt, args.device, args.data_root, args.output_csv)
