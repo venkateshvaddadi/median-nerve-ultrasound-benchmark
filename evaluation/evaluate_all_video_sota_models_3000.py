@@ -198,12 +198,18 @@ def main():
                 # NestedTensor forward for VisTR
                 from models.VisTR.util.misc import NestedTensor
                 B, C, T, H, W = x_clip.shape
-                x_flat = x_clip.permute(0, 2, 1, 3, 4).reshape(B * T, C, H, W)
-                mask_t = torch.zeros((B * T, H, W), dtype=torch.bool, device=device)
+                x_down = F.interpolate(x_clip, size=(T, 224, 160), mode='trilinear', align_corners=False)
+                x_flat = x_down.permute(0, 2, 1, 3, 4).reshape(B * T, C, 224, 160)
+                mask_t = torch.zeros((B * T, 224, 160), dtype=torch.bool, device=device)
                 nested = NestedTensor(x_flat, mask_t)
-                preds = model(nested)
+                preds_masks = model(nested)
+                preds = F.interpolate(preds_masks, size=(H, W), mode='bilinear', align_corners=False).view(B, T, 1, H, W).permute(0, 2, 1, 3, 4)
             else:
-                preds = model(x_clip)
+                B, C, T, H, W = x_clip.shape
+                # Dense spatio-temporal video models accept (B, C, T, 224, 160)
+                x_down = F.interpolate(x_clip, size=(T, 224, 160), mode='trilinear', align_corners=False).to(device)
+                preds_down = model(x_down)
+                preds = F.interpolate(preds_down, size=(T, H, W), mode='trilinear', align_corners=False)
 
             preds_sig = torch.sigmoid(preds)
             preds_bin = (preds_sig > 0.5).float()
