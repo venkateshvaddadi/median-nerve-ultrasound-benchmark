@@ -34,15 +34,30 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-# Add parent directory for imports
+# Add parent and local directories for imports
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../spatio_temporal_video")))
+sys.path.append("/media/medimg/Data/venkatesh_data/Aster/experiement_10_ResUnet")
+sys.path.append("/media/medimg/Data/venkatesh_data/Aster/experiement_10_ResUnet/sota_models")
 
-from video_sota_models import (
-    OriginalTubeDETR, TubeFormer, SAM2MemSAM, VideoMask2Former,
-    VideoSwinUNet, TimeSformerUNet, VideoMambaUNet, get_modified_vistr
-)
-from spatio_temporal_video.video_dataset import VideoAsterDataset
+try:
+    from video_sota_models import (
+        TubeFormer, SAM2MemSAM, VideoMask2Former,
+        VideoSwinUNet, TimeSformerUNet, VideoMambaUNet, get_modified_vistr
+    )
+except ImportError:
+    from sota_models.video_sota_models import (
+        TubeFormer, SAM2MemSAM, VideoMask2Former,
+        VideoSwinUNet, TimeSformerUNet, VideoMambaUNet, get_modified_vistr
+    )
+
+try:
+    from spatio_temporal_video.video_dataset import VideoAsterDataset
+except ImportError:
+    try:
+        from video_dataset import VideoAsterDataset
+    except ImportError:
+        from sota_models.video_dataset import VideoAsterDataset
 
 CALIB_CSA_MM2 = 0.004328254 # Physical calibration factor (mm² per pixel)
 
@@ -131,12 +146,8 @@ def locate_checkpoint(model_name, user_ckpt=None):
 
 def load_model(model_name, ckpt_path, device):
     print(f">> Initializing architecture: {model_name}...")
-    if model_name == "tubedetr":
-        model = OriginalTubeDETR(num_frames=16, in_channels=3, num_classes=1, pretrained=False)
-    elif model_name in ["memsam", "sam2"]:
-        model = SAM2MemSAM(num_frames=16, in_channels=3, num_classes=1)
-    elif model_name == "tubeformer":
-        model = TubeFormer(num_frames=16, in_channels=3, num_classes=1)
+    if model_name in ["tubedetr", "tubeformer"]:
+        model = TubeFormer(in_channels=3, out_channels=1)
     elif model_name == "vistr_resnet101":
         model = get_modified_vistr(backbone="resnet101", num_frames=16)
     elif model_name == "vistr_resnet50":
